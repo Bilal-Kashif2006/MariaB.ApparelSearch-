@@ -1,0 +1,23 @@
+{
+  "name": "bareeze-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@types/chrome": "^0.0.326",
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.8.2",
+    "vitest": "^3.2.4"
+  }
+}

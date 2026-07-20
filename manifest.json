@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Bareeze Shopping Assistant",
+  "version": "0.1.0",
+  "description": "Search and shop Bareeze.com faster, right on their own site.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": ["https://www.bareeze.com/*", "https://bareeze.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Search Bareeze",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https://cdn-live.bareeze.com data:; style-src 'self'"
+  }
+}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Enable microphone — Bareeze Shopping Assistant</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 420px;
+        margin: 48px auto;
+        padding: 0 24px;
+        color: #222;
+      }
+      h1 { font-size: 1.25rem; }
+      .support-copy { color: #555; line-height: 1.5; }
+      button {
+        font-size: 0.95rem;
+        padding: 10px 16px;
+        border-radius: 6px;
+        border: none;
+        background: #111;
+        color: #fff;
+        cursor: pointer;
+      }
+      button.secondary { background: #eee; color: #111; }
+      .status { margin-top: 12px; min-height: 1.2em; }
+      .status.success { color: #1a7f37; }
+      .status.error { color: #b3261e; }
+    </style>
+  </head>
+  <body>
+    <h1>Enable your microphone</h1>
+    <p class="support-copy" id="permission-message">
+      Bareeze needs microphone access only while you record a voice search. Audio is sent to your
+      local voice proxy for transcription and is not stored.
+    </p>
+    <div class="actions">
+      <button id="enable-microphone" type="button">Enable microphone</button>
+      <button id="close-setup" class="secondary" type="button" hidden>Close this tab</button>
+    </div>
+    <p id="permission-status" class="status" role="status" aria-live="polite"></p>
+    <script type="module" src="mic-setup.js"></script>
+  </body>
+</html>

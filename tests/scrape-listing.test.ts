@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { scrapeListingCards } from '../src/content/scrape-listing';
+import { isListingPage, scrapeListingCards } from '../src/content/scrape-listing';
 
 // Real markup captured from bareeze.com/casuals via a live headless-browser
 // render (see README.md) — not hand-typed guesses at the DOM shape.
@@ -51,5 +51,24 @@ describe('scrapeListingCards', () => {
   it('returns an empty list on a page with no cards at all', () => {
     document.body.innerHTML = '<div class="product-detail-inner"></div>';
     expect(scrapeListingCards()).toEqual([]);
+  });
+});
+
+describe('isListingPage', () => {
+  it('recognizes a real listing page by its sort dropdown, even with zero product cards', () => {
+    // A filtered search can legitimately match nothing — Bareeze itself
+    // still renders the sort control and its own "No Products Found" text.
+    document.body.innerHTML = '<div class="sort_select_option">Newest</div><p>No Products Found</p>';
+    expect(isListingPage()).toBe(true);
+  });
+
+  it('recognizes a real listing page by Bareeze\'s own "No Products Found" text alone', () => {
+    document.body.innerHTML = '<p>No Products Found</p>';
+    expect(isListingPage()).toBe(true);
+  });
+
+  it('returns false for a page with neither marker (e.g. the cart or account page)', () => {
+    document.body.innerHTML = '<div class="account-page">Your Account</div>';
+    expect(isListingPage()).toBe(false);
   });
 });

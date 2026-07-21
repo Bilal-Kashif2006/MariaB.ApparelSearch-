@@ -23,7 +23,13 @@ body {
   margin-bottom: 8px;
 }
 
+.search-row {
+  display: flex;
+  gap: 6px;
+}
+
 #search {
+  flex: 1;
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
@@ -32,10 +38,41 @@ body {
   font-size: 13px;
 }
 
+#mic-button {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+#mic-button.recording {
+  background: #b3261e;
+  border-color: #b3261e;
+  filter: grayscale(1) brightness(3);
+}
+
 .status {
   padding: 8px 12px;
   font-size: 12px;
   color: #666;
+}
+
+.voice-summary {
+  padding: 8px 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #444;
+  background: #f7f7f5;
+  border-bottom: 1px solid #eee;
+}
+
+.voice-summary .unmatched {
+  color: #a15c00;
 }
 
 .results {

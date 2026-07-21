@@ -5,7 +5,11 @@
   "description": "Search and shop Bareeze.com faster, right on their own site.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "storage", "scripting"],
-  "host_permissions": ["https://www.bareeze.com/*", "https://bareeze.com/*"],
+  "host_permissions": [
+    "https://www.bareeze.com/*",
+    "https://bareeze.com/*",
+    "http://localhost:8787/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"

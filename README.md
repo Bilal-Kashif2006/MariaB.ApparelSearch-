@@ -106,38 +106,243 @@ semantic/AI search, by design (that was the explicit trade-off for
 | — | `content/scrape-listing.ts`, `content/scrape-product.ts` — new, Bareeze-specific DOM readers |
 | — | `content/add-to-bag.ts` — clicks Bareeze's real button instead of POSTing `/cart/add.js` |
 | — | `src/ui/product-card.ts` — new card renderer for Bareeze's real data shape (title, price, image, slug) |
+| `src/voice/voice-recorder.ts`, `mic-setup.html`/`src/mic-setup.ts` — ported near-verbatim from a sibling project, Dhaaga, which already runs this exact mic-capture/permission-tab pattern in production | `server/` — a much smaller proxy than Dhaaga's (no session/auth), and `src/shared/intent*.ts`/`canonicalize.ts` — Bareeze-specific, scoped to this site's real filter facets only |
 
 ## Status of this repo right now
 
-Scaffold only — confirmed to build clean (`npm run build`, `npm run
-typecheck` both pass) with stub content scripts. Nothing scrapes or clicks
-anything yet.
+Scraping, cart hand-off, typed keyword search, and voice-driven intent
+search are all implemented and build/test clean (`npm run build`, `npm run
+typecheck`, `npm test`).
 
-## Build order (next steps)
+## Voice-driven intent search
 
-1. `src/shared/contracts.ts` — the real data shape: `{ slug, title, subtitle,
-   price, imageUrl }` for a listing card; add `description`/`sizes` for the
-   detail page.
-2. `content/scrape-listing.ts` — implement against the confirmed selectors
-   above; test live against `/casuals`, `/formals`, `/shawls`, `/sale`.
-3. `content/scrape-product.ts` — same, for a detail page; confirm whether
-   stitched-suit products expose a real size/color selector (the one
-   product checked so far had none — single-size item) before designing
-   that part of the UI.
-4. `background.ts` + `popup.ts` + `src/ui/` — inject the right content
-   script for the current tab's URL shape, render results, wire the search
-   box to real category URLs.
-5. `content/add-to-bag.ts` — click-simulate the real "Add To Bag" button;
-   verify a clicked item genuinely lands in Bareeze's own cart (check their
-   `/cart`-equivalent page after).
-6. Tests: vitest unit tests for the card renderer/URL-mapping logic;
-   Playwright e2e against the *live* bareeze.com (matching this session's
-   own "verify against live data, not assumptions" approach) for the
-   scrapers, since their DOM is the actual contract being depended on.
+Beyond typed keyword search (`bestCategoryPath`, unchanged), the mic button
+in the popup records a spoken request ("green casual suit, 2 piece, under
+20000"), sends the clip to a small local proxy for transcription + intent
+extraction, and turns the result into a real Bareeze filter URL — reusing
+the exact same navigate-and-scrape path as everything else here.
+
+**Confirmed live on bareeze.com** (Playwright, not assumed): every category
+page's filter drawer applies instantly on checkbox click (no separate
+"Apply" needed for attribute filters) and reflects the selection in the URL.
+Multiple attribute facets join with a literal `+`, positionally paired:
+
+```
+/casuals?attribute_name=Type+Color&attribute_value=Embroidered+Green&sort=newest
+```
+
+Price is its own param and its floor can always safely be `0`:
+`price=0-20000`. Collection and fabric aren't part of this mechanism —
+they pick the *base path* instead (`/casuals`, `/fabric/lawn`), since
+Bareeze has no combined "casuals that are also lawn" URL; when a shopper
+names both, collection wins.
+
+**Pipeline**: `src/voice/voice-recorder.ts` (MediaRecorder capture) → `POST
+http://localhost:8787/voice-intent` → `server/` (Groq Whisper transcription
++ a Groq LLM call returning loose, natural-language intent fields — not
+Bareeze's exact vocabulary) → `src/shared/canonicalize.ts` (maps that loose
+intent, including Roman Urdu color words, to the exact filter strings above,
+dropping anything unrecognized) → `src/shared/intent-to-url.ts` (pure,
+unit-tested mapper to the URL format above) → the existing `OPEN_CATEGORY`
+message. Typed search (the text box, Enter key) goes through the same
+pipeline via `POST /text-intent` (text in, no audio step), falling back
+instantly to the old local keyword match (`bestCategoryPath`) if the proxy
+isn't reachable at all.
+
+**Running the proxy** (required for voice search and the smarter typed
+search; a basic keyword-only typed search still works without it):
+
+```
+cd server
+npm install
+cp .env.example .env   # then add your own GROQ_API_KEY
+npm run dev
+```
+
+If the proxy isn't running, voice search fails with a clear message and
+typed search falls back to plain keyword matching.
+
+### Smart search and the local catalog
+
+`data/bareeze-catalog.db` is an offline, point-in-time snapshot of the
+catalog (871 products as of the last crawl) with real attribute tags pulled
+from Bareeze's own filter drawers (`scripts/tag-attributes.ts`) and an
+LLM-assigned occasion per product (`scripts/classify-occasion.ts`, weighted
+toward real `Season`/`Type`/`Fabric` signals over generic titles — see that
+script's system prompt). It's what makes occasion search possible at all —
+Bareeze's own filter UI has no "occasion" facet (no wedding, eid, office,
+party, etc.), so there's no live URL that could ever answer "something for
+a wedding".
+
+`server/src/catalog.ts` is the only thing that reads this DB. Both
+`/voice-intent` and `/text-intent` run every recognized facet — collection,
+fabric, color, type, piece count, occasion, price — through it together, so
+"a green formal suit for eid under 20000" is matched as one combined query
+against real product data, not decomposed into separate live-site filters.
+`products` in the response is only `null` when nothing was recognized at
+all; in that one case the popup falls back to the live, always-current
+`intentToBareezeUrl` path (e.g. "show me new in") instead of returning the
+whole catalog unfiltered. Clicking any catalog-result card still opens the
+real, current product page on bareeze.com (same `openProduct` flow as
+everywhere else) — only the *listing* step uses the snapshot, never the
+purchase step, so price/stock is always verified live before checkout.
+
+**Matching degrades gracefully instead of dead-ending.** `rankCatalog` in
+`server/src/catalog.ts` only treats price as a true hard constraint (a
+stated budget is never silently ignored). Every other recognized facet —
+collection, fabric, color, type, piece count, occasion — is scored: if a
+product satisfies the whole combination, only exact matches are returned.
+If nothing does, the closest related products are returned instead (ranked
+by how many of the requested facets they satisfy, worst-matching ones
+dropped entirely), flagged `relaxed: true` so the popup says so honestly
+("No exact match — showing N closest options") rather than presenting a
+broadened result as if it were exact. This closes real dead ends found by
+testing realistic queries against the actual catalog: "3 piece party wear"
+used to return nothing at all, because `party-evening` only has 3 real
+products and none of them happen to be 3-piece — now it ranks those 3
+(closest by occasion) ahead of other 3-piece products from different
+occasions, instead of an empty result the shopper has no way to act on.
+
+Rebuilding the catalog (base crawl → attribute tagging → deterministic
+rules → real-collection ground-truthing → LLM for the remainder, each a
+separate pass — order matters, since each later pass protects the ones
+before it from being overwritten by a worse guess):
+
+```
+node --experimental-strip-types scripts/scrape-catalog.ts
+node --experimental-strip-types scripts/tag-attributes.ts
+node --experimental-strip-types scripts/classify-occasion-rules.ts
+node --experimental-strip-types scripts/verify-eid-collection.ts
+node --experimental-strip-types --env-file=server/.env scripts/classify-occasion.ts
+```
+
+`classify-occasion-rules.ts` applies a priority-ordered set of deterministic
+rules directly over real attribute/category/subtitle/title data — no LLM
+call at all, and as of the current ruleset, **classifies all 871/871
+products** with zero reliance on `classify-occasion.ts`'s LLM. The
+strongest two rules are exactly what that script's own prompt already
+calls a "strong real signal": `Season` containing `EID` → `festive-eid`,
+`Season` containing `WINTER` or a velvet/karandi `Fabric` → `winter-wear`.
+If a signal is reliable enough that the LLM is *told* to treat it as
+decisive, it's reliable enough to just apply in code: free, instant, not
+subject to the LLM sometimes not applying its own stated rule consistently
+(a cross-check found real `Season=EID-*` products classified
+`daily-casual` instead).
+
+Further rules extend this to the remaining real signals: a named formal
+product line (`subtitle = 'Embroidered Classics'`), `category = shawls`,
+a sheer/net fabric or category (`party-evening` — genuinely dressy, not
+everyday), the product's own title containing `FESTIVE` or `COUTURE`, and
+generic `Type = Print/Plain`. `Type = Embroidered` is deliberately split by
+fabric: on `Lawn`/`casuals`/`pret` it stays `daily-casual` (an earlier
+version of this rule didn't check fabric and wrongly promoted 198 ordinary
+embroidered lawn suits to `office-formal` just for having any embroidery);
+only genuinely formal-weight fabric/collections get promoted.
+`classify-occasion.ts` always excludes `source = 'rule-based'` products
+from its own re-runs, same protection as verified-collection entries — so
+if it's ever run again for some future addition to the catalog, it can
+never downgrade an already-resolved product back to a guess.
+
+`tag-attributes.ts` crawls all 16 real product-bearing pages (the 5 main
+collections plus new-in/prints and all 9 fabric-specific pages) — an
+earlier version only covered the 5 main collections on the assumption the
+rest were subsets with no products of their own, which left 209/871
+products (24%) with zero attribute tags at all. Verified fixed: 0 products
+with zero tags after a full re-run.
+
+`verify-eid-collection.ts` cross-checks `festive-eid` classifications
+against Bareeze's own real, curated Eid landing pages (found via the site's
+`sitemap_cat_0.xml`, not guessed) — `/new-in/eid-1-summer-25` and
+`/new-in/eid-2-summer-25` are the only two that currently exist. Products
+confirmed against these get `source = 'verified-collection'` in
+`product_occasion` instead of `'llm'`, and `classify-occasion.ts` always
+excludes already-verified products from its own re-runs, so an LLM guess
+can never overwrite real ground truth.
+
+**Known gaps, confirmed real (not crawl misses):**
+- `wedding-bridal` classifies to 0 products. Checked directly against the
+  site's full category sitemap — there is no wedding/bridal collection
+  anywhere on bareeze.com right now, so this reflects the real catalog, not
+  a classifier or crawl bug. `matchesIntent` in `server/src/catalog.ts`
+  works around this: a `wedding-bridal` query also accepts `festive-eid`
+  and `party-evening` products, since almost every real "wedding"/"shaadi"
+  search is a guest dressing for a function, not the bride herself — see
+  [Who's actually searching](#whos-actually-searching-buyer-personas-behind-the-design)
+  below. A shopper searching for actual bridal couture would still,
+  correctly, find nothing — Bareeze genuinely doesn't sell that.
+- `party-evening` genuinely only has 3 products after the full rule pass
+  (net/sheer fabric or "COUTURE" in the title, with no lawn/casual signal).
+  This isn't a gap left unaddressed — it reflects that Bareeze's real data
+  for this catalog subset has very little that distinctively marks
+  eveningwear apart from ordinary formal wear; most of what an earlier LLM
+  run had called "party-evening" turned out, on inspection, to be products
+  with a real EID/WINTER season tag the LLM hadn't weighted correctly (now
+  correctly resolved to festive-eid/winter-wear) or embroidered lawn
+  casuals with no real evening-wear signal at all.
+- Occasion is inherently a stronger claim for Color/Fabric/Type/Size (those
+  come directly from Bareeze's own filter checkboxes, not inferred) than
+  for occasion, which even with 100% rule-based coverage is still a
+  judgment applied to real signals rather than a fact read off the site.
+  `classify-occasion.ts`'s LLM path remains in the pipeline for future
+  catalog growth (new products the current rules don't have a signal for
+  yet), with one real bug already fixed in it (it used to silently default
+  any product the LLM's batch response omitted to `daily-casual`,
+  contradicting its own prompt's instruction not to do that).
+
+### Who's actually searching: buyer personas behind the design
+
+These aren't survey data — they're grounded in well-established, mainstream
+patterns of how Pakistani women actually shop ready-to-wear clothing
+(occasion-driven purchasing, seasonal fabric switching, heavy Roman Urdu
+code-switching, real price sensitivity), used as a concrete check against
+this specific catalog and matching system rather than designed in the
+abstract. Each one below is written with real example queries, matched
+against what the system actually does today, not what it's assumed to do.
+
+- **The Eid rush shopper.** Shops hardest in the 2–3 weeks before Eid,
+  wants richly embroidered festive pieces, often 3-piece, and flexes her
+  budget upward versus routine shopping. *"eid ke liye teen suit chahiye,
+  embroidered, 20000 tak"* → occasion `eid` → `festive-eid` (277 products,
+  deliberately the largest bucket — grounded in real `Season=EID-*` tags
+  and cross-checked against Bareeze's own two real Eid landing pages, see
+  `verify-eid-collection.ts` above).
+- **The everyday/home shopper.** The most common buyer day to day — wants
+  comfortable, practical lawn suits for routine wear, strongly price-aware,
+  often 2-piece. *"sasta lawn suit chahiye casual, 3000 tak"* → fabric
+  `lawn` + collection `casual`/`sasta`→`sale` + price cap → `daily-casual`
+  (370 products, the single largest occasion — the real catalog genuinely
+  skews everyday, not festive).
+- **The wedding-function guest.** Attends a friend's or cousin's
+  mehndi/baraat/walima and wants festive or dressy eveningwear — she is
+  *not* the bride, and isn't shopping for bridal couture. *"shaadi ke liye
+  kuch dikhao"* / *"walima mein pehnne ke liye party wear"*. This persona is
+  what exposed a real bug while working through it: every wedding-related
+  word (`wedding`, `shaadi`, `baraat`, `walima`, `nikah`, `mehndi`) mapped
+  to `wedding-bridal`, a bucket with zero products — so arguably one of the
+  most common real search intents for a clothing brand always returned
+  nothing. Fixed in `matchesIntent`: a `wedding-bridal` query now also
+  matches `festive-eid` and `party-evening` products (280 combined),
+  because that's the real answer to "what do I wear to a wedding" on a
+  ready-to-wear site that doesn't sell bridal couture.
+- **The winter shopper.** Shops seasonally for shawls/karandi/khaddar,
+  sometimes as a gift (for a mother or mother-in-law). *"sardi ke liye
+  shawl chahiye"* → occasion `sardi` → `winter-wear` (167 products);
+  `shawl` is already its own real collection.
+- **The Roman Urdu–only speaker.** Doesn't use English fashion vocabulary
+  at all — a language-coverage stress test across every field rather than
+  a single occasion. Colors were already well covered (`hara`, `gulabi`,
+  `kaala`, ...); this pass found and closed two real gaps this persona
+  would hit: `collection` had *zero* Roman Urdu terms before (`sasta` →
+  `sale`, `naya`/`nayi` → `new in`, in `src/shared/canonicalize.ts`), and
+  `occasion` was missing common single-word terms for office/winter/daily
+  (`daftar`, `sardi`, `roz`, in `server/src/catalog.ts`).
 
 ## Explicit non-goals (kept out to stay "clean")
 
-- No AI/semantic search — Bareeze's own category structure is the filter.
 - No wishlist/account/cross-device sync — no backend to persist it in.
-- No voice search — dropped from the Resham scaffold to keep scope minimal;
-  can be added back later if wanted.
+- No multi-turn conversation/session state for voice search — every voice
+  query is independent, and the proxy holds no per-user state (the local
+  catalog DB it reads for occasion search is a shared, offline snapshot,
+  not session data).
+- No fuzzy/typo matching in `canonicalize.ts` — a curated alias table only;
+  an unrecognized value is dropped rather than guessed at.

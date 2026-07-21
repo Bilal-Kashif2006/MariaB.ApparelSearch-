@@ -3,6 +3,15 @@
 // /casuals, /formals, /shawls (see README.md).
 import type { ListingCard } from '../shared/contracts';
 
+// A filtered search can legitimately match zero products — Bareeze itself
+// renders "No Products Found" with the sort/filter chrome still present in
+// that case, which is confirmable independently of card count. Without this,
+// a genuine 0-result page is indistinguishable from "this isn't a listing
+// page at all" (e.g. the cart or account page), and gets misreported as such.
+export function isListingPage(): boolean {
+  return Boolean(document.querySelector('.sort_select_option')) || (document.body.textContent?.includes('No Products Found') ?? false);
+}
+
 export function scrapeListingCards(): ListingCard[] {
   const cards: ListingCard[] = [];
   document.querySelectorAll('.singleProductCardContainer').forEach((container) => {
@@ -36,6 +45,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // here would tell Chrome this listener will respond even to messages it
   // ignores, holding the sender's callback open forever once a *different*
   // message type (e.g. SCRAPE_PRODUCT) is sent on the same tab.
-  sendResponse({ cards: scrapeListingCards() });
+  sendResponse({ cards: scrapeListingCards(), isListingPage: isListingPage() });
   return true;
 });

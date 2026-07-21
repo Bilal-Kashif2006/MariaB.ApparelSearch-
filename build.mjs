@@ -12,6 +12,7 @@ async function copyStaticFiles() {
   await Promise.all([
     cp(path.join(root, 'manifest.json'), path.join(dist, 'manifest.json')),
     cp(path.join(root, 'popup.html'), path.join(dist, 'popup.html')),
+    cp(path.join(root, 'mic-setup.html'), path.join(dist, 'mic-setup.html')),
     cp(path.join(root, 'src/styles.css'), path.join(dist, 'popup.css')),
   ]);
 }
@@ -23,6 +24,7 @@ const options = {
   entryPoints: {
     background: path.join(root, 'src/background.ts'),
     popup: path.join(root, 'src/popup.ts'),
+    'mic-setup': path.join(root, 'src/mic-setup.ts'),
   },
   bundle: true,
   format: 'esm',

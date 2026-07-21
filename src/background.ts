@@ -68,12 +68,18 @@ async function scrapeActiveTab(): Promise<PopupResponse> {
     return { type: 'PRODUCT_RESULT', product: product.product, pageUrl: tab.url };
   }
 
-  const listing = await injectAndMessage<{ cards: ListingCard[] }>(
+  const listing = await injectAndMessage<{ cards: ListingCard[]; isListingPage: boolean }>(
     tab.id,
     'scrapeListing.js',
     { type: 'SCRAPE_LISTING' }
   );
-  if (listing && listing.cards.length > 0) {
+  // A filter can legitimately match zero products — isListingPage confirms
+  // this genuinely is a listing/category page (Bareeze's own sort/filter
+  // chrome, or its own "No Products Found" text, is present) rather than
+  // some other bareeze.com page (cart, account, ...) where neither scraper
+  // applies. Without this check, a real 0-result search was
+  // indistinguishable from "not a Bareeze page" and reported as such.
+  if (listing?.cards.length || listing?.isListingPage) {
     return { type: 'LISTING_RESULT', cards: listing.cards, pageUrl: tab.url };
   }
 

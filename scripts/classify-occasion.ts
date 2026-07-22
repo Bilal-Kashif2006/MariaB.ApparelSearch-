@@ -18,6 +18,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { ensureClassificationSchema, type ReviewStatus } from './classification-storage.ts';
 
 const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'bareeze-catalog.db');
 const MODEL = process.env.GROQ_INTENT_MODEL || 'llama-3.3-70b-versatile';
@@ -30,10 +31,25 @@ const OCCASIONS = [
   'wedding-bridal',
   'party-evening',
   'winter-wear',
+  'unclassified',
 ] as const;
 
 const ClassificationSchema = z.object({
-  classifications: z.array(z.object({ slug: z.string(), occasion: z.enum(OCCASIONS) })),
+  classifications: z.array(z.object({
+    slug: z.string(),
+    occasion: z.enum(OCCASIONS),
+    confidence: z.number().min(0).max(1),
+    reason: z.string().min(1).max(500),
+  })),
+});
+const ReviewSchema = z.object({
+  reviews: z.array(z.object({
+    slug: z.string(),
+    occasion: z.enum(OCCASIONS),
+    confidence: z.number().min(0).max(1),
+    decision: z.enum(['confirm', 'change', 'insufficient-evidence']),
+    reason: z.string().min(1).max(500),
+  })),
 });
 
 const apiKey = process.env.GROQ_API_KEY;
@@ -44,18 +60,7 @@ const groq = new Groq({ apiKey });
 
 function openDatabase(): DatabaseSync {
   const db = new DatabaseSync(DB_PATH);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS product_occasion (
-      product_slug TEXT PRIMARY KEY,
-      occasion TEXT NOT NULL,
-      classified_at TEXT NOT NULL,
-      source TEXT NOT NULL DEFAULT 'llm'
-    );
-  `);
-  const columns = db.prepare("PRAGMA table_info(product_occasion)").all() as Array<{ name: string }>;
-  if (!columns.some((c) => c.name === 'source')) {
-    db.exec(`ALTER TABLE product_occasion ADD COLUMN source TEXT NOT NULL DEFAULT 'llm';`);
-  }
+  ensureClassificationSchema(db);
   return db;
 }
 
@@ -67,15 +72,9 @@ interface ProductForClassification {
   attributes: string | null;
 }
 
-// Classifies every product, not just unclassified ones — cheap to re-run in
-// full (a few minutes, batched), and means a later re-run after more
-// attribute data is gathered will actually refresh existing guesses instead
-// of leaving first-pass mistakes stuck forever. Excludes products already
-// verified against a real Bareeze collection (scripts/verify-eid-collection.ts)
-// or already resolved by a deterministic rule (scripts/classify-occasion-
-// rules.ts) — both are higher-confidence than an LLM guess, and a blind
-// re-run must never overwrite either with a worse one.
-function getAllProductsForClassification(db: DatabaseSync): ProductForClassification[] {
+// Only uncertain labels are sent to the API. Verified and high-confidence
+// deterministic labels remain local facts and never consume LLM quota.
+function getProductsForClassification(db: DatabaseSync): ProductForClassification[] {
   const rows = db
     .prepare(
       `SELECT p.slug, p.title, p.subtitle,
@@ -84,14 +83,20 @@ function getAllProductsForClassification(db: DatabaseSync): ProductForClassifica
        FROM products p
        LEFT JOIN product_categories pc ON pc.product_slug = p.slug
        LEFT JOIN product_attributes pa ON pa.product_slug = p.slug
-       WHERE p.slug NOT IN (SELECT product_slug FROM product_occasion WHERE source IN ('verified-collection', 'rule-based'))
+       JOIN product_occasion po ON po.product_slug = p.slug
+       WHERE po.review_status = 'needs-llm-review'
+          OR po.confidence IS NULL
+          OR (po.source IN ('llm', 'llm-review') AND po.review_status = 'needs-recheck')
        GROUP BY p.slug`,
     )
     .all() as unknown as ProductForClassification[];
   return rows;
 }
 
-async function classifyBatch(batch: ProductForClassification[]): Promise<Map<string, string>> {
+type LlmClassification = z.infer<typeof ClassificationSchema>['classifications'][number];
+type LlmReview = z.infer<typeof ReviewSchema>['reviews'][number];
+
+async function classifyBatch(batch: ProductForClassification[]): Promise<Map<string, LlmClassification>> {
   const systemPrompt = `You classify Pakistani women's clothing products by likely occasion/event, for a shopping search feature.
 
 For each product, choose exactly one occasion from this fixed list: ${OCCASIONS.join(', ')}.
@@ -105,7 +110,8 @@ Each product may include real attribute tags scraped from Bareeze's own site —
 
 Use "daily-casual" only when signals genuinely point that way (e.g. category=casuals with no festive/embroidered signal), not as a fallback for lack of information. It is fine and expected for wedding-bridal, party-evening, and winter-wear to be used when the signals support them — do not systematically avoid the less common categories.
 
-Return ONLY a JSON object: { "classifications": [{ "slug": string, "occasion": string }, ...] }, one entry per product given, in any order. No prose.`;
+Return ONLY JSON: { "classifications": [{ "slug": string, "occasion": string, "confidence": number, "reason": string }, ...] }.
+Return one entry per product. Confidence means support from the supplied catalogue data, not how plausible the style sounds. Use unclassified below 0.60 or when the evidence is insufficient. No prose.`;
 
   const userPrompt = batch
     .map((p) => `slug: ${p.slug}\ntitle: ${p.title}\nsubtitle: ${p.subtitle || '(none)'}\ncategory: ${p.categories || '(none)'}\nattributes: ${p.attributes || '(none)'}`)
@@ -123,16 +129,39 @@ Return ONLY a JSON object: { "classifications": [{ "slug": string, "occasion": s
 
   const raw = response.choices[0]?.message?.content ?? '{}';
   const parsed = ClassificationSchema.parse(JSON.parse(raw));
-  return new Map(parsed.classifications.map((c) => [c.slug, c.occasion]));
+  return new Map(parsed.classifications.map((c) => [c.slug, c]));
+}
+
+async function reviewBatch(batch: Array<{ product: ProductForClassification; classification: LlmClassification }>): Promise<Map<string, LlmReview>> {
+  const response = await groq.chat.completions.create({
+    model: MODEL,
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    messages: [
+      {
+        role: 'system',
+        content: `You are an independent quality reviewer for Pakistani women's clothing occasion tags. Challenge the first classifier using only the supplied real Bareeze product data. Choose one: ${OCCASIONS.join(', ')}. Return unclassified if evidence is inadequate. Do not assume a product is festive, bridal, or casual from an abstract title alone. Return ONLY JSON: { "reviews": [{ "slug": string, "occasion": string, "confidence": number, "decision": "confirm"|"change"|"insufficient-evidence", "reason": string }] }.`,
+      },
+      {
+        role: 'user',
+        content: batch.map(({ product, classification }) => `slug: ${product.slug}\ntitle: ${product.title}\nsubtitle: ${product.subtitle || '(none)'}\ncategory: ${product.categories || '(none)'}\nattributes: ${product.attributes || '(none)'}\nfirst result: ${classification.occasion} (${classification.confidence}) — ${classification.reason}`).join('\n---\n'),
+      },
+    ],
+  });
+  const raw = response.choices[0]?.message?.content ?? '{}';
+  const parsed = ReviewSchema.parse(JSON.parse(raw));
+  return new Map(parsed.reviews.map((review) => [review.slug, review]));
 }
 
 async function main() {
   const db = openDatabase();
-  const products = getAllProductsForClassification(db);
-  console.log(`${products.length} products to classify.`);
+  const products = getProductsForClassification(db);
+  console.log(`${products.length} uncertain product(s) queued for LLM classification.`);
 
   const insert = db.prepare(
-    "INSERT OR REPLACE INTO product_occasion (product_slug, occasion, classified_at, source) VALUES (?, ?, ?, 'llm')",
+    `UPDATE product_occasion SET occasion = ?, classified_at = ?, source = ?, confidence = ?, review_status = ?,
+      reason = ?, evidence_json = NULL, reviewer_confidence = ?, reviewer_reason = ?, reviewed_at = ?
+     WHERE product_slug = ?`,
   );
 
   let classified = 0;
@@ -160,10 +189,27 @@ async function main() {
 
       const now = new Date().toISOString();
       for (const product of batch) {
-        const occasion = results.get(product.slug);
-        if (!occasion) continue; // never insert a guess the model didn't actually make
-        insert.run(product.slug, occasion, now);
+        const classification = results.get(product.slug);
+        if (!classification) continue; // never insert a guess the model didn't actually make
+        const needsReview = classification.confidence < 0.8 || classification.occasion === 'unclassified';
+        const status: ReviewStatus = needsReview ? 'needs-llm-review' : 'accepted';
+        insert.run(classification.occasion, now, 'llm', classification.confidence, status, classification.reason, null, null, null, product.slug);
         classified++;
+      }
+      const reviewCandidates = batch.flatMap((product) => {
+        const classification = results.get(product.slug);
+        return classification && (classification.confidence < 0.8 || classification.occasion === 'unclassified') ? [{ product, classification }] : [];
+      });
+      if (reviewCandidates.length > 0) {
+        const reviews = await reviewBatch(reviewCandidates);
+        for (const { product, classification } of reviewCandidates) {
+          const review = reviews.get(product.slug);
+          if (!review) continue;
+          const accepted = review.decision !== 'insufficient-evidence' && review.confidence >= 0.8;
+          const status: ReviewStatus = accepted ? 'accepted' : review.decision === 'insufficient-evidence' || review.confidence < 0.6 ? 'unclassified' : 'needs-recheck';
+          const occasion = status === 'unclassified' ? 'unclassified' : review.occasion;
+          insert.run(occasion, now, 'llm-review', review.confidence, status, review.reason, classification.confidence, classification.reason, now, product.slug);
+        }
       }
       if (missing.length > 0) {
         skipped += missing.length;
@@ -171,7 +217,16 @@ async function main() {
       }
       console.log(`Batch ${batchNum}/${totalBatches}: classified ${batch.length - missing.length}/${batch.length} products.`);
     } catch (error) {
-      console.log(`Batch ${batchNum} FAILED: ${(error as Error).message}`);
+      const message = (error as Error).message;
+      console.log(`Batch ${batchNum} FAILED: ${message}`);
+      // A quota error cannot be improved by immediately retrying the remaining
+      // batches. Stop cleanly; their existing needs-llm-review status keeps
+      // them out of confident occasion matching and makes the next run resume
+      // from exactly this point after the provider quota resets.
+      if (/rate_limit|\b429\b/i.test(message)) {
+        console.log('Stopped after provider rate limit. Re-run later to resume the remaining queue.');
+        break;
+      }
     }
   }
 

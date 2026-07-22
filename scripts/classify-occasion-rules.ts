@@ -19,23 +19,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureClassificationSchema, type ReviewStatus } from './classification-storage.ts';
 
 const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'bareeze-catalog.db');
 
 function openDatabase(): DatabaseSync {
   const db = new DatabaseSync(DB_PATH);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS product_occasion (
-      product_slug TEXT PRIMARY KEY,
-      occasion TEXT NOT NULL,
-      classified_at TEXT NOT NULL,
-      source TEXT NOT NULL DEFAULT 'llm'
-    );
-  `);
-  const columns = db.prepare("PRAGMA table_info(product_occasion)").all() as Array<{ name: string }>;
-  if (!columns.some((c) => c.name === 'source')) {
-    db.exec(`ALTER TABLE product_occasion ADD COLUMN source TEXT NOT NULL DEFAULT 'llm';`);
-  }
+  ensureClassificationSchema(db);
   return db;
 }
 
@@ -85,6 +75,7 @@ function loadProducts(db: DatabaseSync): Product[] {
 interface Rule {
   name: string;
   occasion: string;
+  confidence: number | ((p: Product) => number);
   matches: (p: Product) => boolean;
 }
 
@@ -92,11 +83,13 @@ const RULES: Rule[] = [
   {
     name: 'Season contains EID',
     occasion: 'festive-eid',
+    confidence: 0.98,
     matches: (p) => p.seasons.some((s) => s.toUpperCase().includes('EID')),
   },
   {
     name: 'Season contains WINTER, or velvet/karandi fabric',
     occasion: 'winter-wear',
+    confidence: (p) => p.seasons.some((s) => s.toUpperCase().includes('WINTER')) ? 0.96 : 0.86,
     matches: (p) =>
       p.seasons.some((s) => s.toUpperCase().includes('WINTER')) ||
       p.fabrics.some((f) => /velvet|karandi/i.test(f)),
@@ -106,6 +99,7 @@ const RULES: Rule[] = [
     // explicit signal, but an unambiguous one where it applies.
     name: "title contains 'FESTIVE'",
     occasion: 'festive-eid',
+    confidence: 0.78,
     matches: (p) => p.title.toUpperCase().includes('FESTIVE'),
   },
   {
@@ -113,6 +107,7 @@ const RULES: Rule[] = [
     // directly on real BLACK CLASSIC MHR-style embroidered daywear.
     name: "subtitle 'Embroidered Classics'",
     occasion: 'office-formal',
+    confidence: 0.84,
     matches: (p) => p.subtitle === 'Embroidered Classics',
   },
   {
@@ -122,6 +117,7 @@ const RULES: Rule[] = [
     // already resolved above, so what's left leans office-formal.
     name: 'category=shawls (no EID/winter signal)',
     occasion: 'office-formal',
+    confidence: 0.76,
     matches: (p) => p.categories.has('shawls'),
   },
   {
@@ -134,6 +130,7 @@ const RULES: Rule[] = [
     // promoted to "office-formal" just for having any embroidery at all.
     name: 'Type=EMBROIDERED but Lawn/casuals/pret (still everyday wear)',
     occasion: 'daily-casual',
+    confidence: 0.76,
     matches: (p) =>
       p.types.some((t) => t.toUpperCase() === 'EMBROIDERED') &&
       (p.fabrics.some((f) => f.toLowerCase() === 'lawn') ||
@@ -148,6 +145,7 @@ const RULES: Rule[] = [
     // applies here, with festive already resolved by the EID-season rule.
     name: 'Type=EMBROIDERED, formal-weight fabric/collection',
     occasion: 'office-formal',
+    confidence: 0.83,
     matches: (p) => p.types.some((t) => t.toUpperCase() === 'EMBROIDERED'),
   },
   {
@@ -159,6 +157,7 @@ const RULES: Rule[] = [
     // signal should win.
     name: "Fabric/category is net-based (sheer eveningwear), not lawn",
     occasion: 'party-evening',
+    confidence: 0.83,
     matches: (p) =>
       (p.fabrics.some((f) => /\bnet\b/i.test(f)) || p.categories.has('net')) &&
       !p.fabrics.some((f) => f.toLowerCase() === 'lawn'),
@@ -169,6 +168,7 @@ const RULES: Rule[] = [
     // for checking before the category=embroidered rule below.
     name: "title contains 'COUTURE'",
     occasion: 'party-evening',
+    confidence: 0.88,
     matches: (p) => p.title.toUpperCase().includes('COUTURE'),
   },
   {
@@ -179,6 +179,7 @@ const RULES: Rule[] = [
     // a blanket "any embroidered thing is formal" rule.
     name: "category=embroidered (not Lawn/casual)",
     occasion: 'office-formal',
+    confidence: 0.77,
     matches: (p) =>
       p.categories.has('embroidered') &&
       !p.fabrics.some((f) => f.toLowerCase() === 'lawn') &&
@@ -187,16 +188,19 @@ const RULES: Rule[] = [
   {
     name: 'Type is Printed/Print/Plain',
     occasion: 'daily-casual',
+    confidence: 0.84,
     matches: (p) => p.types.some((t) => /^print|^plain$/i.test(t)),
   },
   {
     name: "subtitle 'Premium Prints'",
     occasion: 'daily-casual',
+    confidence: 0.82,
     matches: (p) => p.subtitle === 'Premium Prints',
   },
   {
     name: "subtitle 'Bareeze Pret' (not embroidered — that's caught above)",
     occasion: 'daily-casual',
+    confidence: 0.78,
     matches: (p) => p.subtitle === 'Bareeze Pret',
   },
   {
@@ -204,6 +208,7 @@ const RULES: Rule[] = [
     // signal at all beyond color — nothing points away from ordinary wear.
     name: 'no Type tag, only in "new in" (nothing else to go on)',
     occasion: 'daily-casual',
+    confidence: 0.45,
     matches: (p) => p.types.length === 0 && p.categories.size <= 1 && p.categories.has('new in'),
   },
   {
@@ -212,6 +217,7 @@ const RULES: Rule[] = [
     // (sale, prints, etc.) it happened to be crawled from.
     name: 'Lawn fabric, no Type tag (nothing points away from ordinary wear)',
     occasion: 'daily-casual',
+    confidence: 0.65,
     matches: (p) => p.types.length === 0 && p.fabrics.some((f) => f.toLowerCase() === 'lawn'),
   },
 ];
@@ -219,11 +225,33 @@ const RULES: Rule[] = [
 function main() {
   const db = openDatabase();
   const products = loadProducts(db);
+  // A verified collection is Bareeze's own explicit catalogue evidence, not
+  // an inference. Backfill its audit fields without changing its label.
+  db.prepare(
+    `UPDATE product_occasion
+     SET confidence = 0.99,
+         review_status = 'accepted',
+         reason = 'Verified against Bareeze collection data',
+         evidence_json = '{"verification":"Bareeze collection"}'
+     WHERE source = 'verified-collection'`,
+  ).run();
   const previousOccasion = db.prepare('SELECT occasion, source FROM product_occasion WHERE product_slug = ?');
   const upsert = db.prepare(
-    `INSERT INTO product_occasion (product_slug, occasion, classified_at, source)
-     VALUES (?, ?, ?, 'rule-based')
-     ON CONFLICT(product_slug) DO UPDATE SET occasion = excluded.occasion, classified_at = excluded.classified_at, source = 'rule-based'`,
+    `INSERT INTO product_occasion
+       (product_slug, occasion, classified_at, source, confidence, review_status, reason, evidence_json,
+        reviewer_confidence, reviewer_reason, reviewed_at)
+     VALUES (?, ?, ?, 'rule-based', ?, ?, ?, ?, NULL, NULL, NULL)
+     ON CONFLICT(product_slug) DO UPDATE SET
+       occasion = excluded.occasion,
+       classified_at = excluded.classified_at,
+       source = excluded.source,
+       confidence = excluded.confidence,
+       review_status = excluded.review_status,
+       reason = excluded.reason,
+       evidence_json = excluded.evidence_json,
+       reviewer_confidence = NULL,
+       reviewer_reason = NULL,
+       reviewed_at = NULL`,
   );
 
   const now = new Date().toISOString();
@@ -244,7 +272,24 @@ function main() {
 
       stats.total++;
       if (!prior || prior.occasion !== rule.occasion) stats.changed++;
-      upsert.run(product.slug, rule.occasion, now);
+      const confidence = typeof rule.confidence === 'function' ? rule.confidence(product) : rule.confidence;
+      const reviewStatus: ReviewStatus = confidence >= 0.8 ? 'accepted' : 'needs-llm-review';
+      const evidence = {
+        rule: rule.name,
+        categories: [...product.categories],
+        seasons: product.seasons,
+        fabrics: product.fabrics,
+        types: product.types,
+      };
+      upsert.run(
+        product.slug,
+        rule.occasion,
+        now,
+        confidence,
+        reviewStatus,
+        rule.name,
+        JSON.stringify(evidence),
+      );
       resolvedThisRun.add(product.slug);
     }
     counts.set(rule.name, stats);

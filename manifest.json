@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Bareeze Shopping Assistant",
+  "name": "StyleAssistant",
   "version": "0.1.0",
   "description": "Search and shop Bareeze.com faster, right on their own site.",
   "minimum_chrome_version": "116",
@@ -15,7 +15,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Open Bareeze Shopping Assistant",
+    "default_title": "Open StyleAssistant",
     "default_popup": "popup.html"
   },
   "content_security_policy": {

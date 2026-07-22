@@ -1,3 +1,6 @@
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import express from 'express';
 import Groq from 'groq-sdk';
@@ -5,6 +8,7 @@ import type { ListingCard } from '../../src/shared/contracts';
 import {
   canonicalizeForCatalog,
   dropNegatedFields,
+  invalidateCatalogCache,
   isEmptyCatalogIntent,
   mergeCatalogIntent,
   searchCatalog,
@@ -13,22 +17,35 @@ import {
 import { describeSearchFailure, planShoppingTurn } from './intent.js';
 import { CatalogIntentSchema, type RawIntent } from './schema.js';
 import { transcribeAudio } from './transcribe.js';
+import { STORE_CONFIG } from '../../src/shared/store.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024; // 10 MB — generous for a short voice query
+const DB_REFRESH_ENABLED = process.env.DB_REFRESH_ENABLED !== 'false';
+const DB_REFRESH_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.DB_REFRESH_INTERVAL_HOURS || '24') * 60 * 60 * 1000,
+);
+const SCRAPED_DB_REFRESH_ENABLED = process.env.SCRAPED_DB_REFRESH_ENABLED === 'true';
+const SCRAPED_DB_REFRESH_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.SCRAPED_DB_REFRESH_INTERVAL_HOURS || '24') * 60 * 60 * 1000,
+);
+const PROJECT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const DB_REFRESH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'update-maria-b-db.mjs');
+const DB_REFRESH_SOURCE = path.join(PROJECT_ROOT, 'data', 'resham.db');
+const DB_REFRESH_TARGET = path.join(PROJECT_ROOT, STORE_CONFIG.server.catalogDbRelativePath);
+const SCRAPED_DB_REFRESH_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'update-maria-b-scraped-db.mjs');
+const SCRAPED_DB_TARGET = path.join(PROJECT_ROOT, 'data', 'maria-b-scraped.db');
+const SCRAPED_DB_SNAPSHOT_SOURCE = path.join(PROJECT_ROOT, STORE_CONFIG.server.catalogDbRelativePath);
 
-// Groq only transcribes voice audio now — text/JSON planning runs on Gemini
-// (see intent.ts) after Groq's free-tier daily token cap made typed search
-// unreliable. Both keys are required: Groq for Whisper, Gemini for planning.
+// Groq handles Whisper transcription and is also the primary planner for
+// text/JSON shopping intent. Gemini is optional and used only as a fallback
+// if configured.
 const apiKey = process.env.GROQ_API_KEY;
 if (!apiKey) {
   throw new Error(
     'GROQ_API_KEY is not set. Copy server/.env.example to server/.env and add your Groq API key before starting the proxy.',
-  );
-}
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error(
-    'GEMINI_API_KEY is not set. Copy server/.env.example to server/.env and add your Gemini API key before starting the proxy.',
   );
 }
 
@@ -47,6 +64,85 @@ if (!allowedOrigin) {
 const groq = new Groq({ apiKey });
 const app = express();
 
+const refreshInFlight = new Set<string>();
+
+function runRefreshJob(
+  jobName: string,
+  trigger: 'startup' | 'interval',
+  enabled: boolean,
+  scriptPath: string,
+  args: string[],
+  onSuccess?: () => void,
+): void {
+  if (!enabled || refreshInFlight.has(jobName)) return;
+  refreshInFlight.add(jobName);
+  console.log(`[${jobName}] starting ${trigger} refresh`);
+
+  const child = spawn(process.execPath, [scriptPath, ...args], {
+    cwd: PROJECT_ROOT,
+    stdio: 'inherit',
+  });
+
+  child.on('exit', (code) => {
+    refreshInFlight.delete(jobName);
+    if (code === 0) {
+      onSuccess?.();
+      console.log(`[${jobName}] completed ${trigger} refresh`);
+      return;
+    }
+    console.error(`[${jobName}] ${trigger} refresh failed with exit code ${code ?? 'unknown'}`);
+  });
+
+  child.on('error', (error) => {
+    refreshInFlight.delete(jobName);
+    console.error(`[${jobName}] failed to start ${trigger} refresh`, error);
+  });
+}
+
+function runCatalogRefresh(trigger: 'startup' | 'interval'): void {
+  runRefreshJob(
+    'db-refresh',
+    trigger,
+    DB_REFRESH_ENABLED,
+    DB_REFRESH_SCRIPT,
+    [DB_REFRESH_SOURCE, DB_REFRESH_TARGET],
+    () => {
+      invalidateCatalogCache();
+      console.log('[db-refresh] invalidated in-memory catalog cache');
+    },
+  );
+}
+
+function runScrapedCatalogRefresh(trigger: 'startup' | 'interval'): void {
+  runRefreshJob(
+    'scraped-db-refresh',
+    trigger,
+    SCRAPED_DB_REFRESH_ENABLED,
+    SCRAPED_DB_REFRESH_SCRIPT,
+    [SCRAPED_DB_TARGET, SCRAPED_DB_SNAPSHOT_SOURCE],
+  );
+}
+
+function scheduleCatalogRefresh(): void {
+  if (!DB_REFRESH_ENABLED) {
+    console.log('[db-refresh] disabled by DB_REFRESH_ENABLED=false');
+  } else {
+    console.log(`[db-refresh] scheduled every ${Math.round(DB_REFRESH_INTERVAL_MS / 3_600_000)} hour(s)`);
+    runCatalogRefresh('startup');
+    setInterval(() => runCatalogRefresh('interval'), DB_REFRESH_INTERVAL_MS).unref();
+  }
+
+  if (!SCRAPED_DB_REFRESH_ENABLED) {
+    console.log('[scraped-db-refresh] disabled by SCRAPED_DB_REFRESH_ENABLED=false');
+    return;
+  }
+  console.log(
+    `[scraped-db-refresh] scheduled every ${Math.round(SCRAPED_DB_REFRESH_INTERVAL_MS / 3_600_000)} hour(s)`,
+  );
+  runScrapedCatalogRefresh('startup');
+  setInterval(() => runScrapedCatalogRefresh('interval'), SCRAPED_DB_REFRESH_INTERVAL_MS).unref();
+}
+
 app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 app.use(express.json());
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -62,7 +158,7 @@ function parsePreviousIntent(raw: unknown): CatalogIntent | null {
 
 // The catalog matches on every recognized facet at once, not just occasion
 // — searchCatalog runs whenever the shopper's intent has anything for it to
-// filter on. null products means "use the live intentToBareezeUrl path
+// filter on. null products means "fall back to a broad live collection path
 // instead" (genuinely empty intent, or the local DB isn't reachable); []
 // means "the catalog understood the request but has no match at all, not
 // even a related one" — the two are deliberately not conflated so the
@@ -109,8 +205,8 @@ async function resolveIntentAndProducts(
 
   // A model may occasionally choose "search" while extracting no usable
   // catalog facet. Fail safely into a helpful question instead of treating
-  // that as permission to show arbitrary New In products.
-  // An extracted, canonical Bareeze facet is already enough to search. The
+  // that as permission to show arbitrary broad products.
+  // An extracted, canonical Maria B facet is already enough to search. The
   // model may still choose "clarify" for a named occasion to ask budget,
   // but that creates needless friction: "Eid", "Mehndi", or "Nikkah" is
   // a useful catalog request on its own.
@@ -125,7 +221,7 @@ async function resolveIntentAndProducts(
       priceRelaxApplied,
       conversationAction: isUnsupported ? 'unsupported' : 'clarify',
       assistantReply: plan.question || (isUnsupported
-        ? "I can't verify a suitable Bareeze category for that request. Tell me what type of item or occasion you have in mind."
+        ? `I can't verify a suitable ${STORE_CONFIG.brandName} category for that request. Tell me what type of item or occasion you have in mind.`
         : 'What is the occasion or style you are shopping for?'),
     };
   }
@@ -147,7 +243,7 @@ async function resolveIntentAndProducts(
       assistantReply: null,
     };
   } catch (error) {
-    console.error('Local catalog search failed (was data/bareeze-catalog.db built?):', error);
+    console.error(`Local catalog search failed (is ${STORE_CONFIG.server.catalogDbRelativePath} available?):`, error);
     return { intent: guardedIntent, canonicalIntent, products: [], relaxed: false, priceRelaxRequested, priceRelaxApplied, conversationAction: 'search', assistantReply: null };
   }
 }
@@ -238,5 +334,6 @@ app.use((err: { status?: number; statusCode?: number }, _req: express.Request, r
 });
 
 app.listen(PORT, () => {
-  console.log(`Bareeze voice-intent proxy listening on http://localhost:${PORT}`);
+  console.log(`${STORE_CONFIG.brandName} voice-intent proxy listening on http://localhost:${PORT}`);
+  scheduleCatalogRefresh();
 });

@@ -163,7 +163,7 @@ describe('planShoppingTurn', () => {
     });
   });
 
-  it('gives the planner the real Bareeze niche and verified category scope', async () => {
+  it('gives the planner the real Maria B niche and verified category scope', async () => {
     const fetchMock = fakeGemini([
       JSON.stringify({ action: 'search', searchScope: 'new', question: null, intent: { occasion: 'eid' } }),
     ]);
@@ -172,8 +172,8 @@ describe('planShoppingTurn', () => {
 
     const systemPrompt = requestBody(fetchMock, 0).systemInstruction.parts[0].text;
     expect(systemPrompt).toContain("Pakistani women's fashion");
-    expect(systemPrompt).toContain('casuals, formals, pret, prints, shawls');
-    expect(systemPrompt).toContain("children's or menswear");
+    expect(systemPrompt).toContain("casuals, luxury pret, luxury formals, wedding wear, couture");
+    expect(systemPrompt).toContain('childrenswear or menswear');
   });
 });
 

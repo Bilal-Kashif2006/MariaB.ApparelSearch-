@@ -71,6 +71,12 @@ describe('canonicalizeOccasion', () => {
     expect(canonicalizeOccasion('roz')).toBe('daily-casual');
     expect(canonicalizeOccasion('mehndi')).toBe('wedding-bridal');
   });
+
+  it('maps ceremony-style phrases into a searchable occasion bucket', () => {
+    expect(canonicalizeOccasion('highschool prize distribution ceremony')).toBe('party-evening');
+    expect(canonicalizeOccasion('graduation ceremony')).toBe('party-evening');
+    expect(canonicalizeOccasion('outdoor picnic')).toBe('daily-casual');
+  });
 });
 
 describe('canonicalizeForCatalog', () => {
@@ -82,7 +88,7 @@ describe('canonicalizeForCatalog', () => {
     expect(intent).toEqual({
       collection: 'casuals',
       fabric: null,
-      color: 'GREEN',
+      color: 'Green',
       type: null,
       pieceCount: null,
       occasion: 'wedding-bridal',

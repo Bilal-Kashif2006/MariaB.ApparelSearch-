@@ -1,0 +1,51 @@
+{
+  "brandKey": "maria-b",
+  "brandName": "Maria B",
+  "assistantName": "Maria B",
+  "site": {
+    "origin": "https://mariab.pk",
+    "primaryDomain": "mariab.pk",
+    "hostnames": ["mariab.pk", "www.mariab.pk"],
+    "productPathPrefix": "/products/",
+    "fallbackCollectionPath": "/collections/all?sort_by=created-descending"
+  },
+  "extension": {
+    "name": "Maria B Shopping Assistant",
+    "description": "Search and shop Maria B faster, right on their own site.",
+    "defaultTitle": "Open Maria B Shopping Assistant",
+    "conversationKey": "mariaBConversation",
+    "layoutKey": "mariaBExpandedLayout",
+    "cspImageHosts": [
+      "https://cdn.shopify.com",
+      "https://mariab.pk",
+      "https://www.mariab.pk"
+    ]
+  },
+  "server": {
+    "catalogDbRelativePath": "data/maria-b.db",
+    "productUrlPrefix": "https://mariab.pk/products/",
+    "catalogScopeLabel": "women's Maria B products only",
+    "supportedCollections": [
+      "casuals",
+      "luxury pret",
+      "luxury formals",
+      "wedding wear",
+      "couture",
+      "unstitched",
+      "accessories",
+      "new arrivals"
+    ],
+    "supportedFabrics": [
+      "lawn",
+      "linen",
+      "chiffon",
+      "cotton",
+      "silk",
+      "velvet",
+      "organza",
+      "net",
+      "polyester",
+      "wool"
+    ]
+  }
+}

@@ -1,6 +1,5 @@
 // Message contracts between popup, background, and content scripts, plus
-// the real data shapes scraped off bareeze.com. See README.md for the
-// verified DOM structure these are read from.
+// the real data shapes scraped off Maria B pages.
 
 export interface ListingCard {
   slug: string; // e.g. "shadow-work-42", from the card's own link href
@@ -8,6 +7,12 @@ export interface ListingCard {
   subtitle: string | null; // e.g. "New Selection" / "Casuals"
   price: string; // display string as shown, e.g. "PKR 20,050"
   imageUrl: string | null;
+  inStock?: boolean | null;
+  onSale?: boolean | null;
+  compareAtPrice?: string | null;
+  availableSizes?: string[] | null;
+  availableVariantCount?: number | null;
+  salePercent?: number | null;
 }
 
 export interface ProductDetail {
@@ -16,30 +21,27 @@ export interface ProductDetail {
   sku: string | null;
   price: string;
   images: string[];
-  options: string[]; // whatever the page's own option radiogroup offers, if any
+  options: string[]; // whatever the live product page exposes, if any
 }
 
-// Bareeze's own real category/fabric pages — confirmed from the live site's
-// nav menu, not guessed. The popup search maps a shopper's words to the
-// closest of these rather than running its own search index.
+// Maria B collection landing pages. The extension's primary search path is
+// the local catalog served by server/, so these are only used for light
+// site hand-offs such as "show me something fresh" when there is no local
+// catalog result to render.
 export const CATEGORY_PATHS: Record<string, string> = {
-  casuals: '/casuals',
-  formals: '/formals',
-  shawls: '/shawls',
-  'new in': '/new-in',
-  prints: '/prints/view-all',
-  embroidered: '/formals',
-  sale: '/sale',
-  pret: '/bareeze-pret',
-  lawn: '/fabric/lawn',
-  khaddar: '/fabric/khaddar',
-  velvet: '/fabric/velvet',
-  chiffon: '/fabric/chiffon',
-  organza: '/fabric/organza',
-  net: '/fabric/net',
-  cotton: '/fabric/cotton',
-  cambric: '/fabric/cambric',
-  karandi: '/fabric/karandi',
+  'new arrivals': '/collections/all',
+  casuals: '/collections/all',
+  'luxury pret': '/collections/all',
+  'luxury formals': '/collections/all',
+  'wedding wear': '/collections/all',
+  couture: '/collections/all',
+  accessories: '/collections/all',
+  unstitched: '/collections/all',
+  lawn: '/collections/all',
+  linen: '/collections/all',
+  chiffon: '/collections/all',
+  cotton: '/collections/all',
+  silk: '/collections/all',
 };
 
 export type PopupRequest =
@@ -53,13 +55,13 @@ export type PopupRequest =
 export type PopupResponse =
   | { type: 'LISTING_RESULT'; cards: ListingCard[]; pageUrl: string }
   | { type: 'PRODUCT_RESULT'; product: ProductDetail; pageUrl: string }
-  // viewCartUrl/checkoutUrl come from the real cart drawer Bareeze itself
+  // viewCartUrl/checkoutUrl come from the real cart drawer Maria B itself
   // opens right after a successful add — checkoutUrl in particular is a
   // per-session path (a UUID Bareeze mints for that cart), never a fixed
   // route, so it can only be read off the page, not constructed here.
   | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }
   | { type: 'PATH_OPENED' }
-  | { type: 'NOT_A_BAREEZE_PAGE' }
+  | { type: 'NOT_A_STORE_PAGE' }
   | { type: 'STORE_OK' }
   | { type: 'ERROR'; error: string };
 

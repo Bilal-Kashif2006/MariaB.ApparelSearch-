@@ -1,10 +1,8 @@
-import { RateLimitError } from 'groq-sdk';
+import Groq, { RateLimitError } from 'groq-sdk';
 import { ConversationPlanSchema, RawIntentSchema, type ConversationPlan, type RawIntent } from './schema.js';
+import { STORE_CONFIG } from '../../src/shared/store.js';
 
-// Text/JSON planning runs on Gemini, not Groq — Groq's Whisper transcription
-// (transcribe.ts) is a separate rate-limit bucket and stays on Groq. Voice
-// search still calls into this module after transcription, so both text and
-// voice search share this Gemini path.
+const GROQ_MODEL = process.env.GROQ_INTENT_MODEL || 'llama-3.3-70b-versatile';
 const GEMINI_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-2.5-flash';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -15,7 +13,7 @@ const MAX_LOGGED_MODEL_OUTPUT = 20_000;
 
 function logModel(event: string, details: Record<string, unknown>): void {
   if (!VERBOSE_LLM_LOGS) return;
-  console.error(`[gemini] ${event}`, details);
+  console.error(`[llm] ${event}`, details);
 }
 
 function modelOutputForLog(raw: string): string {
@@ -24,7 +22,10 @@ function modelOutputForLog(raw: string): string {
     : raw;
 }
 
-const SYSTEM_PROMPT = `You are a shopping-intent extractor for Bareeze, a Pakistani women's clothing brand.
+const SUPPORTED_COLLECTIONS = STORE_CONFIG.server.supportedCollections.join(', ');
+const SUPPORTED_FABRICS = STORE_CONFIG.server.supportedFabrics.join(', ');
+
+const SYSTEM_PROMPT = `You are a shopping-intent extractor for ${STORE_CONFIG.brandName}, a Pakistani women's fashion brand.
 
 Given a shopper's spoken or typed request (which may be in English, Urdu, or Roman Urdu), extract these fields as a single JSON object:
 
@@ -39,8 +40,8 @@ Given a shopper's spoken or typed request (which may be in English, Urdu, or Rom
 }
 
 Field meanings:
-- collection: the broad product line, e.g. casual, formal, shawl, new arrivals, sale, pret, prints.
-- fabric: the material, e.g. lawn, khaddar, velvet, chiffon, organza, net, cotton, cambric, karandi.
+- collection: the broad product line, e.g. ${SUPPORTED_COLLECTIONS}.
+- fabric: the material, e.g. ${SUPPORTED_FABRICS}.
 - color: any named color, in the shopper's own words (e.g. "hara", "sabz", "green" are all valid — do not translate or normalize it yourself).
 - type: a construction/finish descriptor, e.g. embroidered.
 - pieceCount: how many pieces in the suit, e.g. "2 piece", "3 piece".
@@ -52,18 +53,19 @@ Rules:
 - Do not invent, translate, or normalize values — return them close to how the shopper said them; a separate system handles matching them to the store's exact catalog terms.
 - Return ONLY the JSON object. No prose, no markdown fences.`;
 
-const PLANNER_SYSTEM_PROMPT = `You are Bareeze's specialist shopping assistant for Pakistani women's fashion. Decide the next useful action for a real shopper, using the conversation context and newest message.
+const PLANNER_SYSTEM_PROMPT = `You are ${STORE_CONFIG.brandName}'s specialist shopping assistant for Pakistani women's fashion. Decide the next useful action for a real shopper, using the conversation context and newest message.
 
-Your verified local Bareeze catalogue covers women's casuals, formals, pret, prints, shawls, new arrivals and sale. Its verified fabric families include lawn, khaddar, velvet, chiffon, organza, net, cotton, cambric and karandi. It can filter or rank by collection, fabric, color, embroidered/printed style, piece count, occasion, and maximum PKR budget.
+Your verified local ${STORE_CONFIG.brandName} catalogue covers ${STORE_CONFIG.server.catalogScopeLabel}, including ${SUPPORTED_COLLECTIONS}. Its verified fabric families include ${SUPPORTED_FABRICS}. It can filter or rank by collection, fabric, color, embroidered/printed/dyed style, piece count, occasion, and maximum PKR budget.
 
 Treat this as a fashion consultation, not a generic keyword search:
 - Understand natural needs such as Eid, office wear, wedding guest, party, daily wear, winter dressing, gifting, a desired colour, a fabric, or a budget.
 - A clear occasion alone is enough to search; do not interrogate a shopper for every possible field.
-- For a broad need, ask the ONE decision-making question that will materially improve a Bareeze recommendation. Prefer occasion first, then budget or colour only if the occasion is already clear.
+- For a broad need, ask the ONE decision-making question that will materially improve a ${STORE_CONFIG.brandName} recommendation. Prefer occasion first, then budget or colour only if the occasion is already clear.
 - Use prior messages to resolve follow-ups such as "cheaper", "less formal", "same in green", "for my mother", or "something like the second one".
+- If the newest shopper message answers your previous clarification question, convert that answer into a "search" and carry forward the earlier described item details into intent. Do not ask the same occasion/style question again after the shopper has already answered it.
 - Generic chat, greetings, and vague requests should receive a concise, warm clarification—not products.
 
-The local catalogue has no verified children's or menswear collection. Do not turn those requests into unrelated women's products. Be direct about the scope and offer the closest useful next step. Do not invent product facts, availability, categories, sizing advice, or customer details.
+The local catalogue used for this assistant is scoped to ${STORE_CONFIG.server.catalogScopeLabel}. Do not turn childrenswear or menswear requests into unrelated women's products. Be direct about the scope and offer the closest useful next step. Do not invent product facts, availability, categories, sizing advice, or customer details.
 
 Return ONLY one of these JSON objects:
 
@@ -116,10 +118,10 @@ For an unsupported request:
 }
 
 Decision rules:
-- Use "search" when the shopper has given at least one usable Bareeze shopping facet or is refining an existing search. Extract every facet stated or implied by the conversation.
+- Use "search" when the shopper has given at least one usable ${STORE_CONFIG.brandName} shopping facet or is refining an existing search. Extract every facet stated or implied by the conversation.
 - Set "searchScope" to "new" when this is a new shopping goal, a newly named occasion, or an answer to a clarification that replaces the earlier need. "new" discards old filters. Set it to "refine" only when the shopper explicitly adjusts the current result set, such as "cheaper", "green instead", "same style", or "more formal".
 - Use "clarify" when the request is too broad to search responsibly. Ask exactly ONE short, specific question that would most improve the result. Do not ask a checklist of questions.
-- Use "unsupported" only when the request needs a catalogue category Bareeze does not offer or cannot verify, such as children's or menswear. Explain briefly and offer the nearest helpful next step without recommending unrelated products.
+- Use "unsupported" only when the request needs a catalogue category ${STORE_CONFIG.brandName} does not offer in this assistant's verified catalogue scope, such as children's or menswear. Explain briefly and offer the nearest helpful next step without recommending unrelated products.
 - For "clarify" and "unsupported", set "searchScope" to null.
 - The shopper may use English, Urdu, or Roman Urdu. Preserve their wording in intent values; another system normalizes them.
 - Never use "search" with an empty intent. Never produce product recommendations or prose outside question.`;
@@ -189,11 +191,62 @@ type GeminiResponse = {
 };
 
 async function complete(messages: ChatMessage[], requestLabel: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set.');
+  const groqApiKey = process.env.GROQ_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+
+  if (groqApiKey) {
+    try {
+      return await completeViaGroq(groqApiKey, messages, requestLabel);
+    } catch (error) {
+      logModel('provider failed', {
+        provider: 'groq',
+        request: requestLabel,
+        model: GROQ_MODEL,
+        error: error instanceof Error ? { name: error.name, message: error.message } : error,
+      });
+      if (!geminiApiKey) throw error;
+    }
   }
 
+  if (!geminiApiKey) {
+    throw new Error('No planner API key is configured. Set GROQ_API_KEY (preferred) or GEMINI_API_KEY.');
+  }
+
+  return completeViaGemini(geminiApiKey, messages, requestLabel);
+}
+
+async function completeViaGroq(apiKey: string, messages: ChatMessage[], requestLabel: string): Promise<string> {
+  const client = new Groq({ apiKey });
+  try {
+    const response = await client.chat.completions.create({
+      model: GROQ_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages,
+    });
+
+    const raw = response.choices[0]?.message?.content ?? '';
+    logModel('response', {
+      provider: 'groq',
+      request: requestLabel,
+      model: GROQ_MODEL,
+      finishReason: response.choices[0]?.finish_reason,
+      usage: response.usage,
+      output: modelOutputForLog(raw),
+    });
+    return raw;
+  } catch (error) {
+    logModel('request failed', {
+      provider: 'groq',
+      request: requestLabel,
+      model: GROQ_MODEL,
+      error: error instanceof Error ? { name: error.name, message: error.message } : error,
+    });
+    throw error;
+  }
+}
+
+async function completeViaGemini(apiKey: string, messages: ChatMessage[], requestLabel: string): Promise<string> {
   const systemInstruction = messages
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
@@ -223,6 +276,7 @@ async function complete(messages: ChatMessage[], requestLabel: string): Promise<
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
       logModel('request failed', {
+        provider: 'gemini',
         request: requestLabel,
         model: GEMINI_MODEL,
         status: response.status,
@@ -237,6 +291,7 @@ async function complete(messages: ChatMessage[], requestLabel: string): Promise<
     const data = (await response.json()) as GeminiResponse;
     const raw = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
     logModel('response', {
+      provider: 'gemini',
       request: requestLabel,
       model: GEMINI_MODEL,
       output: modelOutputForLog(raw),
@@ -244,6 +299,7 @@ async function complete(messages: ChatMessage[], requestLabel: string): Promise<
     return raw;
   } catch (error) {
     logModel('request failed', {
+      provider: 'gemini',
       request: requestLabel,
       model: GEMINI_MODEL,
       error: error instanceof Error ? { name: error.name, message: error.message } : error,

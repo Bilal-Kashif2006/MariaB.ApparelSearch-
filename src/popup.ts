@@ -8,6 +8,7 @@ import type {
   ProductDetail,
 } from './shared/contracts';
 import { canonicalizeIntent, type RawIntentFields } from './shared/canonicalize';
+import { STORE_ASSISTANT_LABEL, STORE_BLOCKING_COPY, STORE_CONFIG, STORE_OPEN_PROMPT, STORE_STATUS_LABEL } from './shared/store';
 import { summarizeIntentMatch } from './shared/summarize-intent-match';
 import { renderListingCard } from './ui/product-card';
 import { VoiceRecorder } from './voice/voice-recorder';
@@ -21,8 +22,8 @@ import {
 } from './config';
 
 // The proxy's raw intent shape includes occasion — the one facet the local
-// catalog (data/bareeze-catalog.db) matches that Bareeze's own live filter
-// UI has no equivalent for. See server/src/catalog.ts.
+// catalog adapter matches that Maria B's live site does not reliably expose
+// as a deterministic front-end filter.
 type RawIntentWithOccasion = RawIntentFields & { occasion?: string | null };
 
 interface ServerIntentResult {
@@ -79,11 +80,13 @@ const recordingStrip = mustElement('recording-strip');
 const recordingTime = mustElement('recording-time');
 const layoutToggle = mustElement<HTMLButtonElement>('layout-toggle');
 const checkStoreButton = mustElement<HTMLButtonElement>('check-store');
+const blockingMessage = mustElement('blocking-message');
+const chatInputLabel = document.querySelector('label[for="chat-input"]') as HTMLLabelElement | null;
 
 const welcomeMessage: ChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  text: 'I’m your Bareeze Style Assistant. Tell me the occasion, colour, fabric, or budget you have in mind, and I’ll help you find the right look.',
+  text: `I’m your ${STORE_ASSISTANT_LABEL} Style Assistant. Tell me the occasion, colour, fabric, or budget you have in mind, and I’ll help you find the right look.`,
 };
 
 let messages: ChatMessage[] = [welcomeMessage];
@@ -122,7 +125,7 @@ function renderChat(isTyping = false): void {
     bubble.className = `message ${item.role}`;
     const label = document.createElement('span');
     label.className = 'message-label';
-    label.textContent = item.role === 'assistant' ? 'Bareeze' : 'You';
+    label.textContent = item.role === 'assistant' ? STORE_ASSISTANT_LABEL : 'You';
     const text = document.createElement('span');
     text.textContent = item.text;
     bubble.append(label, text);
@@ -133,10 +136,10 @@ function renderChat(isTyping = false): void {
     bubble.className = 'message assistant';
     const label = document.createElement('span');
     label.className = 'message-label';
-    label.textContent = 'Bareeze';
+    label.textContent = STORE_ASSISTANT_LABEL;
     const typing = document.createElement('span');
     typing.className = 'typing-message';
-    typing.setAttribute('aria-label', 'Bareeze is thinking');
+    typing.setAttribute('aria-label', `${STORE_ASSISTANT_LABEL} is thinking`);
     typing.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
     bubble.append(label, typing);
     chatThread.append(bubble);
@@ -252,7 +255,7 @@ function renderResults(products: ListingCard[] | null, relaxed: boolean): void {
   notice.hidden = false;
   notice.textContent = relaxed
     ? 'No exact match — these are the closest curated alternatives.'
-    : 'Curated from the Bareeze catalog. Confirm price and availability on the product page.';
+    : `Curated from the ${STORE_ASSISTANT_LABEL} catalog. Confirm price and availability on the product page.`;
   appendNextProductBatch(true);
   noMatches.hidden = products.length > 0;
   productList.hidden = products.length === 0;
@@ -341,7 +344,7 @@ function buildAssistantReply(result: ServerIntentResult, unmatched: string[]): s
 }
 
 async function fetchLiveNewIn(): Promise<ListingCard[]> {
-  const response = await sendMessage({ type: 'OPEN_CATEGORY', path: '/new-in' });
+  const response = await sendMessage({ type: 'OPEN_CATEGORY', path: STORE_CONFIG.site.fallbackCollectionPath });
   return response.type === 'LISTING_RESULT' ? response.cards.slice(0, PRODUCT_BATCH_SIZE) : [];
 }
 
@@ -561,7 +564,7 @@ function showProductDetail(product: ProductDetail): void {
     cartActions.hidden = true;
     const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug });
     if (response.type === 'ADD_TO_BAG_RESULT' && response.ok) {
-      status.textContent = 'Added to your Bareeze bag.';
+      status.textContent = `Added to your ${STORE_ASSISTANT_LABEL} cart.`;
       addButton.textContent = 'Added';
       viewCartUrl = response.viewCartUrl || '/cart';
       checkoutUrl = response.checkoutUrl ?? null;
@@ -747,7 +750,7 @@ async function checkActiveStore(): Promise<void> {
   }
 
   if (response.type === 'STORE_OK') {
-    storeName.textContent = 'Live on bareeze.com';
+    storeName.textContent = STORE_STATUS_LABEL;
     workspaceView.hidden = false;
     blockingView.hidden = true;
     chatInput.focus();
@@ -814,4 +817,8 @@ window.addEventListener('pagehide', () => {
 });
 
 void restoreState();
+blockingTitle.textContent = STORE_OPEN_PROMPT;
+blockingMessage.textContent = STORE_BLOCKING_COPY;
+workspaceView.setAttribute('aria-label', `${STORE_ASSISTANT_LABEL} shopping workspace`);
+if (chatInputLabel) chatInputLabel.textContent = `Message the ${STORE_ASSISTANT_LABEL} assistant`;
 void checkActiveStore();

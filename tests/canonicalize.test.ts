@@ -10,21 +10,18 @@ import {
 
 describe('canonicalizeColor', () => {
   it('maps an exact English color name to itself', () => {
-    expect(canonicalizeColor('GREEN')).toBe('GREEN');
+    expect(canonicalizeColor('GREEN')).toBe('Green');
   });
 
   it('is case-insensitive', () => {
-    // GREEN is the real canonical casing — verified against actual product
-    // counts (see intent.ts): Bareeze's own "Green" (Title Case) tag is a
-    // near-empty legacy duplicate, "GREEN" holds the real inventory.
-    expect(canonicalizeColor('green')).toBe('GREEN');
-    expect(canonicalizeColor('Green')).toBe('GREEN');
+    expect(canonicalizeColor('green')).toBe('Green');
+    expect(canonicalizeColor('Green')).toBe('Green');
   });
 
-  it('maps common Roman Urdu color words to the matching Bareeze value', () => {
-    expect(canonicalizeColor('hara')).toBe('GREEN');
-    expect(canonicalizeColor('laal')).toBe('RED');
-    expect(canonicalizeColor('kaala')).toBe('BLACK');
+  it('maps common Roman Urdu color words to the matching Maria B value', () => {
+    expect(canonicalizeColor('hara')).toBe('Green');
+    expect(canonicalizeColor('laal')).toBe('Red');
+    expect(canonicalizeColor('kaala')).toBe('Black');
     expect(canonicalizeColor('safed')).toBe('White');
   });
 
@@ -35,26 +32,21 @@ describe('canonicalizeColor', () => {
   });
 
   it('falls back to the base color noun for an unlisted modifier + color phrase', () => {
-    // "dark green" isn't in the alias table itself, but shouldn't be
-    // dropped entirely — the shopper still clearly wants green.
-    expect(canonicalizeColor('dark green')).toBe('GREEN');
-    expect(canonicalizeColor('royal blue')).toBe('BLUE');
-    expect(canonicalizeColor('sea-green')).toBe('GREEN');
+    expect(canonicalizeColor('dark green')).toBe('Green');
+    expect(canonicalizeColor('royal blue')).toBe('Blue');
+    expect(canonicalizeColor('sea-green')).toBe('Green');
   });
 
   it('still drops a multi-word phrase whose last word is also unrecognized', () => {
     expect(canonicalizeColor('dark holographic')).toBeNull();
   });
 
-  it('maps rare real colors that were entirely missing from the vocabulary', () => {
-    // Zinc/Plum/Golden/Falsa each appear on exactly one real product in a
-    // full-catalog crawl but had no entry anywhere in COLOR_VALUES/
-    // COLOR_ALIASES — canonicalizeColor used to drop all four unconditionally.
-    expect(canonicalizeColor('zinc')).toBe('Zinc');
-    expect(canonicalizeColor('plum')).toBe('Plum');
-    expect(canonicalizeColor('golden')).toBe('Golden');
-    expect(canonicalizeColor('gold')).toBe('Golden');
-    expect(canonicalizeColor('falsa')).toBe('Falsa');
+  it('maps rarer color words to the nearest Maria B canonical color bucket', () => {
+    expect(canonicalizeColor('zinc')).toBe('Grey');
+    expect(canonicalizeColor('plum')).toBe('Purple');
+    expect(canonicalizeColor('golden')).toBe('Yellow');
+    expect(canonicalizeColor('gold')).toBe('Yellow');
+    expect(canonicalizeColor('falsa')).toBe('Purple');
   });
 });
 
@@ -72,15 +64,11 @@ describe('canonicalizeType', () => {
     expect(canonicalizeType('with heavy embroidery')).toBe('Embroidered');
   });
 
-  it('maps printed and plain to their real catalog values', () => {
-    // These were missing from the vocabulary entirely until a full-catalog
-    // crawl found 103 real products tagged Printed/Print/PLAIN with no
-    // alias able to match any of them — canonicalizeType('printed') used to
-    // return null even though it's a real, common Bareeze Type value.
-    expect(canonicalizeType('printed')).toBe('Print');
-    expect(canonicalizeType('print')).toBe('Print');
-    expect(canonicalizeType('plain')).toBe('Plain');
-    expect(canonicalizeType('printed suit')).toBe('Print');
+  it('maps printed and plain into the Maria B type buckets', () => {
+    expect(canonicalizeType('printed')).toBe('Printed');
+    expect(canonicalizeType('print')).toBe('Printed');
+    expect(canonicalizeType('plain')).toBe('Dyed');
+    expect(canonicalizeType('printed suit')).toBe('Printed');
   });
 
   it('drops an unrecognized type', () => {
@@ -89,25 +77,25 @@ describe('canonicalizeType', () => {
 });
 
 describe('canonicalizePieceCount', () => {
-  it('maps natural phrasing to the exact Bareeze piece-count value', () => {
-    expect(canonicalizePieceCount('2 piece')).toBe('2-Pieces');
-    expect(canonicalizePieceCount('two piece')).toBe('2-Pieces');
-    expect(canonicalizePieceCount('three piece')).toBe('3-Pieces');
+  it('maps natural phrasing to the Maria B piece-count value', () => {
+    expect(canonicalizePieceCount('2 piece')).toBe('2 Piece');
+    expect(canonicalizePieceCount('two piece')).toBe('2 Piece');
+    expect(canonicalizePieceCount('three piece')).toBe('3 Piece');
   });
 
   it('matches the number regardless of which noun it sits next to', () => {
     // Regression: shoppers call these "suits", not just "pieces" — an
     // earlier version only matched the exact phrase "N piece(s)" and
     // silently dropped anything else, including this very natural phrasing.
-    expect(canonicalizePieceCount('two suit')).toBe('2-Pieces');
-    expect(canonicalizePieceCount('three suit')).toBe('3-Pieces');
-    expect(canonicalizePieceCount('3 suit')).toBe('3-Pieces');
-    expect(canonicalizePieceCount('2-piece suit')).toBe('2-Pieces');
+    expect(canonicalizePieceCount('two suit')).toBe('2 Piece');
+    expect(canonicalizePieceCount('three suit')).toBe('3 Piece');
+    expect(canonicalizePieceCount('3 suit')).toBe('3 Piece');
+    expect(canonicalizePieceCount('2-piece suit')).toBe('2 Piece');
   });
 
   it('maps Roman Urdu number words', () => {
-    expect(canonicalizePieceCount('do suit')).toBe('2-Pieces');
-    expect(canonicalizePieceCount('teen suit')).toBe('3-Pieces');
+    expect(canonicalizePieceCount('do suit')).toBe('2 Piece');
+    expect(canonicalizePieceCount('teen suit')).toBe('3 Piece');
   });
 
   it('drops an unrecognized piece count', () => {
@@ -119,39 +107,37 @@ describe('canonicalizePieceCount', () => {
 describe('canonicalizeCollection', () => {
   it('maps a plural/singular collection word to its CATEGORY_PATHS key', () => {
     expect(canonicalizeCollection('casual')).toBe('casuals');
-    expect(canonicalizeCollection('formals')).toBe('formals');
+    expect(canonicalizeCollection('formals')).toBe('luxury formals');
   });
 
-  it('maps "new arrivals" to the "new in" key', () => {
-    expect(canonicalizeCollection('new arrivals')).toBe('new in');
+  it('maps "new arrivals" to the Maria B new-arrivals key', () => {
+    expect(canonicalizeCollection('new arrivals')).toBe('new arrivals');
   });
 
   it('matches when the alias word is part of a longer natural phrase', () => {
     // Same regression class as pieceCount/type: "casual wear" and "formal
     // dress" are how people actually talk, not the bare alias word.
     expect(canonicalizeCollection('casual wear')).toBe('casuals');
-    expect(canonicalizeCollection('formal dress')).toBe('formals');
-    expect(canonicalizeCollection('shawl collection')).toBe('shawls');
+    expect(canonicalizeCollection('formal dress')).toBe('luxury formals');
+    expect(canonicalizeCollection('pret collection')).toBe('luxury pret');
   });
 
   it('drops an unrecognized collection', () => {
     expect(canonicalizeCollection('menswear')).toBeNull();
   });
 
-  it('maps Roman Urdu words for "cheap" and "new" to their real collections', () => {
-    // "sasta suit chahiye" / "naya collection dikhao" are how shoppers who
-    // default to Roman Urdu actually phrase these two requests.
-    expect(canonicalizeCollection('sasta')).toBe('sale');
-    expect(canonicalizeCollection('sasta suit')).toBe('sale');
-    expect(canonicalizeCollection('naya')).toBe('new in');
-    expect(canonicalizeCollection('nayi collection')).toBe('new in');
+  it('maps Roman Urdu words for "cheap" and "new" to the closest Maria B collection', () => {
+    expect(canonicalizeCollection('sasta')).toBe('new arrivals');
+    expect(canonicalizeCollection('sasta suit')).toBe('new arrivals');
+    expect(canonicalizeCollection('naya')).toBe('new arrivals');
+    expect(canonicalizeCollection('nayi collection')).toBe('new arrivals');
   });
 });
 
 describe('canonicalizeFabric', () => {
   it('maps a fabric word to its CATEGORY_PATHS key', () => {
     expect(canonicalizeFabric('Lawn')).toBe('lawn');
-    expect(canonicalizeFabric('khadar')).toBe('khaddar');
+    expect(canonicalizeFabric('khadar')).toBe('linen');
   });
 
   it('matches when the alias word is part of a longer natural phrase', () => {
@@ -164,18 +150,13 @@ describe('canonicalizeFabric', () => {
   });
 
   it('maps fabrics that only exist as a catalog attribute, not a live collection page', () => {
-    // Regression: polyester/linen/pashmina are real, crawl-verified Fabric
-    // attribute values (21/9/1 products) but canonicalizeFabric used to
-    // drop all three — there's no live /fabric/polyester or /fabric/linen
-    // page (confirmed: both behave like a nonexistent path), but they still
-    // need to work for the catalog attribute match.
     expect(canonicalizeFabric('polyester')).toBe('polyester');
     expect(canonicalizeFabric('linen')).toBe('linen');
-    expect(canonicalizeFabric('pashmina')).toBe('pashmina');
+    expect(canonicalizeFabric('pashmina')).toBe('wool');
   });
 
-  it('drops an unrecognized fabric', () => {
-    expect(canonicalizeFabric('silk')).toBeNull();
+  it('keeps real Maria B fabrics instead of dropping them', () => {
+    expect(canonicalizeFabric('silk')).toBe('silk');
   });
 });
 
@@ -197,10 +178,10 @@ describe('canonicalizeIntent', () => {
     // Assert
     expect(intent).toEqual({
       collection: 'casuals',
-      fabric: null,
-      color: 'GREEN',
+      fabric: 'silk',
+      color: 'Green',
       type: 'Embroidered',
-      pieceCount: '2-Pieces',
+      pieceCount: '2 Piece',
       priceMax: 20000,
     });
   });

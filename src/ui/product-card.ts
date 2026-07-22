@@ -70,6 +70,29 @@ export function renderListingCard(card: ListingCard, index: number, onOpen: (slu
   price.className = 'product-price';
   price.textContent = card.price;
   body.append(price);
+  if (card.onSale && card.compareAtPrice) {
+    const compareAt = document.createElement('span');
+    compareAt.className = 'product-compare-price';
+    compareAt.textContent = card.compareAtPrice;
+    body.append(compareAt);
+  }
+  if (card.availableSizes?.length) {
+    const sizes = document.createElement('span');
+    sizes.className = 'product-meta';
+    sizes.textContent = `Sizes: ${card.availableSizes.slice(0, 4).join(', ')}${card.availableSizes.length > 4 ? '…' : ''}`;
+    body.append(sizes);
+  }
+  if (card.inStock === false) {
+    const stock = document.createElement('span');
+    stock.className = 'product-stock';
+    stock.textContent = 'Out of stock';
+    body.append(stock);
+  } else if (card.onSale && typeof card.salePercent === 'number' && card.salePercent > 0) {
+    const stock = document.createElement('span');
+    stock.className = 'product-stock';
+    stock.textContent = `${card.salePercent}% off`;
+    body.append(stock);
+  }
 
   el.append(media, body, externalLinkIcon());
 

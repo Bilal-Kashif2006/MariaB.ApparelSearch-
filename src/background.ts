@@ -1,22 +1,14 @@
-// MV3 service worker — relays messages between the popup and the content
-// scripts injected into the active bareeze.com tab. Every action starts
-// from an explicit popup click, so `activeTab` is enough permission —
-// nothing here runs unprompted in the background.
 import type { ListingCard, PopupRequest, PopupResponse, ProductDetail } from './shared/contracts';
+import { STORE_CONFIG, STORE_HOST_PATTERNS, STORE_URL_PATTERN } from './shared/store';
 
-const BAREEZE_URL_PATTERN = /^https:\/\/(www\.)?bareeze\.com\//;
+const STORE_ORIGIN = STORE_CONFIG.site.origin;
+const STORE_QUERY_PATTERNS = STORE_HOST_PATTERNS;
 
-async function activeBareezeTab(): Promise<chrome.tabs.Tab | null> {
-  // Prefer the actually-active tab (the normal case: the shopper clicked
-  // the toolbar icon while on bareeze.com). host_permissions already
-  // covers bareeze.com broadly (this extension is single-site by design,
-  // unlike Resham's multi-brand one), so falling back to "most recently
-  // used bareeze.com tab in any window" is both permitted and more
-  // resilient than requiring exact focus at the instant of the message.
+async function activeStoreTab(): Promise<chrome.tabs.Tab | null> {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (active?.id && active.url && BAREEZE_URL_PATTERN.test(active.url)) return active;
+  if (active?.id && active.url && STORE_URL_PATTERN.test(active.url)) return active;
 
-  const candidates = await chrome.tabs.query({ url: ['https://www.bareeze.com/*', 'https://bareeze.com/*'] });
+  const candidates = await chrome.tabs.query({ url: STORE_QUERY_PATTERNS });
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
   return candidates[0];
@@ -31,7 +23,7 @@ function injectAndMessage<T>(tabId: number, file: string, message: unknown): Pro
           chrome.tabs.sendMessage(tabId, message, (response) => {
             resolve(chrome.runtime.lastError ? null : (response as T));
           });
-        })
+        }),
     )
     .catch(() => null);
 }
@@ -49,20 +41,13 @@ function waitForTabLoad(tabId: number): Promise<void> {
 }
 
 async function scrapeActiveTab(): Promise<PopupResponse> {
-  const tab = await activeBareezeTab();
-  if (!tab?.id || !tab.url) return { type: 'NOT_A_BAREEZE_PAGE' };
+  const tab = await activeStoreTab();
+  if (!tab?.id || !tab.url) return { type: 'NOT_A_STORE_PAGE' };
 
-  // Product detail pages have their own "you may also like" carousel built
-  // from the exact same card markup as a real category listing — so a
-  // listing-shaped result alone doesn't prove this is a listing page.
-  // Checking for the product page's own, more specific markers first (real
-  // observed bug: without this order, a detail page's related-products rail
-  // was misread as the whole page being a category listing) is what
-  // actually disambiguates the two.
   const product = await injectAndMessage<{ product: ProductDetail | null }>(
     tab.id,
     'scrapeProduct.js',
-    { type: 'SCRAPE_PRODUCT' }
+    { type: 'SCRAPE_PRODUCT' },
   );
   if (product?.product) {
     return { type: 'PRODUCT_RESULT', product: product.product, pageUrl: tab.url };
@@ -71,29 +56,17 @@ async function scrapeActiveTab(): Promise<PopupResponse> {
   const listing = await injectAndMessage<{ cards: ListingCard[]; isListingPage: boolean }>(
     tab.id,
     'scrapeListing.js',
-    { type: 'SCRAPE_LISTING' }
+    { type: 'SCRAPE_LISTING' },
   );
-  // A filter can legitimately match zero products — isListingPage confirms
-  // this genuinely is a listing/category page (Bareeze's own sort/filter
-  // chrome, or its own "No Products Found" text, is present) rather than
-  // some other bareeze.com page (cart, account, ...) where neither scraper
-  // applies. Without this check, a real 0-result search was
-  // indistinguishable from "not a Bareeze page" and reported as such.
   if (listing?.cards.length || listing?.isListingPage) {
     return { type: 'LISTING_RESULT', cards: listing.cards, pageUrl: tab.url };
   }
 
-  return { type: 'NOT_A_BAREEZE_PAGE' };
+  return { type: 'NOT_A_STORE_PAGE' };
 }
 
-// Navigation targets are resolved the same way reads are: prefer an
-// existing bareeze.com tab over the popup's own transient tab (real popups
-// aren't tabs at all, but automated tooling that opens popup.html as a page
-// makes this distinction concrete — and it's the right call for a real
-// shopper too, since it means "keep browsing in the tab I was already on"
-// rather than hijacking whatever happens to be focused).
 async function resolveTabToNavigate(): Promise<chrome.tabs.Tab | null> {
-  const existing = await activeBareezeTab();
+  const existing = await activeStoreTab();
   if (existing?.id) return existing;
   const [fallback] = await chrome.tabs.query({ active: true, currentWindow: true });
   return fallback?.id ? fallback : null;
@@ -103,58 +76,31 @@ async function navigateActiveTab(path: string): Promise<PopupResponse> {
   const tab = await resolveTabToNavigate();
   if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
 
-  await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com${path}` });
+  await chrome.tabs.update(tab.id, { url: `${STORE_ORIGIN}${path}` });
   await waitForTabLoad(tab.id);
-  // The SPA still renders its product grid client-side after "complete" fires.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 1200));
   return scrapeActiveTab();
 }
 
-// Navigates the shopper's real bareeze.com tab (so gallery, sizes/options,
-// stock, Add to Bag, and checkout are all Bareeze's own live UI, not a
-// stale snapshot) and scrapes it right back for the popup's in-panel detail
-// view — the popup itself never leaves the search results underneath it.
 async function openProduct(slug: string): Promise<PopupResponse> {
   const tab = await resolveTabToNavigate();
   if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
-  await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com/${encodeURIComponent(slug)}` });
-  restoreProductPageScroll(tab.id);
+  await chrome.tabs.update(tab.id, { url: `${STORE_ORIGIN}${STORE_CONFIG.site.productPathPrefix}${encodeURIComponent(slug)}` });
   await waitForTabLoad(tab.id);
-  // The SPA still renders its product grid client-side after "complete" fires.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 1200));
   return scrapeActiveTab();
 }
 
-// Used for View Cart / Checkout: both are a plain hand-off to a path
-// Bareeze itself already produced (either the fixed /cart route or the
-// per-session checkout link read out of the cart drawer), never a page this
-// extension scrapes or renders any UI for.
 async function openPath(path: string): Promise<PopupResponse> {
   const tab = await resolveTabToNavigate();
   if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
-  await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com${path}` });
+  await chrome.tabs.update(tab.id, { url: path.startsWith('http') ? path : `${STORE_ORIGIN}${path}` });
   return { type: 'PATH_OPENED' };
 }
 
-function restoreProductPageScroll(tabId: number): void {
-  const timeout = setTimeout(() => chrome.tabs.onUpdated.removeListener(listener), 12_000);
-  function listener(updatedTabId: number, info: chrome.tabs.TabChangeInfo) {
-    if (updatedTabId !== tabId || info.status !== 'complete') return;
-    chrome.tabs.onUpdated.removeListener(listener);
-    clearTimeout(timeout);
-    // Bareeze hydrates after the browser's load event, so wait briefly for
-    // its app shell to finish applying responsive classes before repairing
-    // a lingering scroll lock.
-    setTimeout(() => {
-      void chrome.scripting.executeScript({ target: { tabId }, files: ['restorePageScroll.js'] }).catch(() => undefined);
-    }, 900);
-  }
-  chrome.tabs.onUpdated.addListener(listener);
-}
-
 async function addToBag(slug: string): Promise<PopupResponse> {
-  const targetUrl = `https://www.bareeze.com/${slug}`;
-  const existing = await activeBareezeTab();
+  const targetUrl = `${STORE_ORIGIN}${STORE_CONFIG.site.productPathPrefix}${encodeURIComponent(slug)}`;
+  const existing = await activeStoreTab();
   let tabId = existing?.id;
 
   if (!existing || existing.url !== targetUrl) {
@@ -163,13 +109,13 @@ async function addToBag(slug: string): Promise<PopupResponse> {
     tabId = tab.id;
     await chrome.tabs.update(tabId, { url: targetUrl });
     await waitForTabLoad(tabId);
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
   }
 
   const result = await injectAndMessage<{ ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }>(
     tabId!,
     'addToBag.js',
-    { type: 'CLICK_ADD_TO_BAG' }
+    { type: 'CLICK_ADD_TO_BAG' },
   );
   return {
     type: 'ADD_TO_BAG_RESULT',
@@ -193,12 +139,9 @@ chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendRespon
     } else if (message.type === 'OPEN_PATH') {
       sendResponse(await openPath(message.path));
     } else if (message.type === 'CHECK_STORE') {
-      // Cheaper than SCRAPE_ACTIVE_TAB for a plain support check: no content
-      // script injection, just "does a bareeze.com tab exist" (same lookup
-      // scrapeActiveTab itself relies on).
-      const tab = await activeBareezeTab();
-      sendResponse(tab ? { type: 'STORE_OK' } : { type: 'NOT_A_BAREEZE_PAGE' });
+      const tab = await activeStoreTab();
+      sendResponse(tab ? { type: 'STORE_OK' } : { type: 'NOT_A_STORE_PAGE' });
     }
   })();
-  return true; // keep the message channel open for the async response above
+  return true;
 });

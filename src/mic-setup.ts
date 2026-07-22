@@ -1,3 +1,5 @@
+import { STORE_ASSISTANT_LABEL } from './shared/store';
+
 // Ported from Dhaaga's extension/src/microphone.ts. MV3 popups can't
 // reliably keep a getUserMedia permission grant across popup close/reopen —
 // this dedicated tab is where the one-time browser permission prompt
@@ -16,9 +18,9 @@ function mustElement<T extends HTMLElement = HTMLElement>(id: string): T {
 }
 
 function showReady(): void {
-  status.textContent = 'Microphone is ready. Return to the Bareeze popup and tap the mic again.';
+  status.textContent = `Microphone is ready. Return to the ${STORE_ASSISTANT_LABEL} popup and tap the mic again.`;
   status.className = 'status success';
-  message.textContent = 'Permission granted. Bareeze will access the microphone only when you tap the mic button.';
+  message.textContent = `Permission granted. ${STORE_ASSISTANT_LABEL} will access the microphone only when you tap the mic button.`;
   enableButton.hidden = true;
   closeButton.hidden = false;
   closeButton.focus();

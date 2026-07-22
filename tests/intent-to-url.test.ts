@@ -12,7 +12,7 @@ const EMPTY_INTENT: ShoppingIntent = {
 };
 
 describe('intentToBareezeUrl', () => {
-  it('falls back to the New In page with just a sort param when nothing is known', () => {
+  it('falls back to the broad Maria B collection page with just a sort param when nothing is known', () => {
     // Arrange
     const intent = { ...EMPTY_INTENT };
 
@@ -20,40 +20,40 @@ describe('intentToBareezeUrl', () => {
     const url = intentToBareezeUrl(intent);
 
     // Assert
-    expect(url).toBe('/new-in?sort=newest');
+    expect(url).toBe('/collections/all?sort=newest');
   });
 
   it('uses the collection as the base path and adds color as an attribute filter', () => {
     // Arrange
-    const intent: ShoppingIntent = { ...EMPTY_INTENT, collection: 'casuals', color: 'GREEN' };
+    const intent: ShoppingIntent = { ...EMPTY_INTENT, collection: 'casuals', color: 'Green' };
 
     // Act
     const url = intentToBareezeUrl(intent);
 
     // Assert
-    expect(url).toBe('/casuals?attribute_name=Color&attribute_value=GREEN&sort=newest');
+    expect(url).toBe('/collections/all?attribute_name=Color&attribute_value=Green&sort=newest');
   });
 
   it('uses fabric as the base path when no collection is named', () => {
     // Arrange
-    const intent: ShoppingIntent = { ...EMPTY_INTENT, fabric: 'lawn', color: 'GREEN' };
+    const intent: ShoppingIntent = { ...EMPTY_INTENT, fabric: 'lawn', color: 'Green' };
 
     // Act
     const url = intentToBareezeUrl(intent);
 
     // Assert
-    expect(url).toBe('/fabric/lawn?attribute_name=Color&attribute_value=GREEN&sort=newest');
+    expect(url).toBe('/collections/all?attribute_name=Color&attribute_value=Green&sort=newest');
   });
 
   it('prefers collection over fabric as the base path when both are named', () => {
     // Arrange
-    const intent: ShoppingIntent = { ...EMPTY_INTENT, collection: 'formals', fabric: 'lawn' };
+    const intent: ShoppingIntent = { ...EMPTY_INTENT, collection: 'luxury formals', fabric: 'lawn' };
 
     // Act
     const url = intentToBareezeUrl(intent);
 
     // Assert
-    expect(url).toBe('/formals?sort=newest');
+    expect(url).toBe('/collections/all?sort=newest');
   });
 
   it('joins multiple attribute facets with a literal "+", positionally paired', () => {
@@ -61,9 +61,9 @@ describe('intentToBareezeUrl', () => {
     const intent: ShoppingIntent = {
       ...EMPTY_INTENT,
       collection: 'casuals',
-      color: 'GREEN',
+      color: 'Green',
       type: 'Embroidered',
-      pieceCount: '2-Pieces',
+      pieceCount: '2 Piece',
     };
 
     // Act
@@ -71,7 +71,7 @@ describe('intentToBareezeUrl', () => {
 
     // Assert
     expect(url).toBe(
-      '/casuals?attribute_name=Color+Type+Size&attribute_value=GREEN+Embroidered+2-Pieces&sort=newest',
+      '/collections/all?attribute_name=Color+Type+Size&attribute_value=Green+Embroidered+2%20Piece&sort=newest',
     );
   });
 
@@ -83,7 +83,7 @@ describe('intentToBareezeUrl', () => {
     const url = intentToBareezeUrl(intent);
 
     // Assert
-    expect(url).toBe('/casuals?price=0-20000&sort=newest');
+    expect(url).toBe('/collections/all?price=0-20000&sort=newest');
   });
 
   it('ignores a non-positive or non-finite priceMax', () => {
@@ -93,8 +93,8 @@ describe('intentToBareezeUrl', () => {
     const notFinite: ShoppingIntent = { ...EMPTY_INTENT, collection: 'casuals', priceMax: NaN };
 
     // Act & Assert
-    expect(intentToBareezeUrl(zero)).toBe('/casuals?sort=newest');
-    expect(intentToBareezeUrl(negative)).toBe('/casuals?sort=newest');
-    expect(intentToBareezeUrl(notFinite)).toBe('/casuals?sort=newest');
+    expect(intentToBareezeUrl(zero)).toBe('/collections/all?sort=newest');
+    expect(intentToBareezeUrl(negative)).toBe('/collections/all?sort=newest');
+    expect(intentToBareezeUrl(notFinite)).toBe('/collections/all?sort=newest');
   });
 });

@@ -4,10 +4,8 @@ import type { ShoppingIntent } from './intent';
 const PRICE_FLOOR = 0;
 const DEFAULT_SORT = 'newest';
 
-// No collection/fabric named at all: land on Bareeze's own "New In" page,
-// confirmed live to accept the same attribute_name/attribute_value filters
-// as every other category page.
-const DEFAULT_BASE_PATH = CATEGORY_PATHS['new in'];
+// No collection/fabric named at all: land on a broad Maria B collection page.
+const DEFAULT_BASE_PATH = CATEGORY_PATHS['new arrivals'];
 
 function encodeToken(value: string): string {
   return encodeURIComponent(value);

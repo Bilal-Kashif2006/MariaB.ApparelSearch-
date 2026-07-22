@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "StyleAssistant",
+  "name": "Maria B Shopping Assistant",
   "version": "0.1.0",
-  "description": "Search and shop Bareeze.com faster, right on their own site.",
+  "description": "Search and shop Maria B faster, right on their own site.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "storage", "scripting"],
   "host_permissions": [
-    "https://www.bareeze.com/*",
-    "https://bareeze.com/*",
+    "https://www.mariab.pk/*",
+    "https://mariab.pk/*",
     "http://localhost:8787/*"
   ],
   "background": {
@@ -15,10 +15,10 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Open StyleAssistant",
+    "default_title": "Open Maria B Shopping Assistant",
     "default_popup": "popup.html"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https://cdn-live.bareeze.com data:; style-src 'self'"
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https://cdn.shopify.com https://mariab.pk https://www.mariab.pk data:; style-src 'self'"
   }
 }

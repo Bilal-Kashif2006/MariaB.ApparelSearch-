@@ -113,6 +113,18 @@ describe('planShoppingTurn', () => {
     expect(prompt).toContain('green instead');
   });
 
+  it('defaults an older planner reply without searchScope to a safe new search', async () => {
+    const client = fakeClient([
+      JSON.stringify({ action: 'search', question: null, intent: { occasion: 'eid' } }),
+    ]);
+
+    await expect(planShoppingTurn(client, 'show Eid outfits', '')).resolves.toMatchObject({
+      action: 'search',
+      searchScope: 'new',
+      intent: { occasion: 'eid' },
+    });
+  });
+
   it('gives the planner the real Bareeze niche and verified category scope', async () => {
     const client = fakeClient([
       JSON.stringify({ action: 'search', searchScope: 'new', question: null, intent: { occasion: 'eid' } }),

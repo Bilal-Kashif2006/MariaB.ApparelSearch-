@@ -109,6 +109,42 @@ function lookup<T extends string>(
   return aliases[raw.trim().toLowerCase()] ?? null;
 }
 
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    let diagonal = previous[0];
+    previous[0] = row;
+    for (let column = 1; column <= right.length; column += 1) {
+      const saved = previous[column];
+      previous[column] = Math.min(
+        previous[column] + 1,
+        previous[column - 1] + 1,
+        diagonal + (left[row - 1] === right[column - 1] ? 0 : 1),
+      );
+      diagonal = saved;
+    }
+  }
+  return previous[right.length];
+}
+
+// A small, deliberately conservative typo bridge for real catalog terms:
+// "gren" → green, "chifon" → chiffon. We only consider single-word keys of
+// four or more characters, require a unique nearest match, and never turn a
+// distant word into a facet. The LLM remains the language layer; this makes
+// the final, catalog-bound mapping resilient when it receives a near miss.
+function fuzzyWordLookup<T extends string>(word: string, aliases: Record<string, T>): T | null {
+  if (word.length < 4) return null;
+  const threshold = word.length >= 7 ? 2 : 1;
+  const candidates = Object.entries(aliases)
+    .filter(([key]) => !key.includes(' '))
+    .map(([key, value]) => ({ distance: editDistance(word, key), value }))
+    .filter(({ distance }) => distance <= threshold)
+    .sort((left, right) => left.distance - right.distance);
+  if (candidates.length === 0) return null;
+  if (candidates.length > 1 && candidates[0].distance === candidates[1].distance) return null;
+  return candidates[0].value;
+}
+
 // Shoppers rarely say the bare alias word on its own — "lawn suit", "casual
 // wear", "embroidered dress", "formal collection" are all more natural than
 // "lawn"/"casual"/"embroidered"/"formal" alone. Matching only the whole
@@ -131,6 +167,10 @@ export function lookupWithWordFallback<T extends string>(
     const match = aliases[word];
     if (match) return match;
   }
+  for (const word of words) {
+    const match = fuzzyWordLookup(word, aliases);
+    if (match) return match;
+  }
   return null;
 }
 
@@ -144,8 +184,9 @@ function lookupColor(raw: string | null | undefined): string | null {
   const exact = lookup(raw, COLOR_ALIASES);
   if (exact) return exact;
   const words = raw?.trim().toLowerCase().split(/[\s-]+/) ?? [];
-  if (words.length < 2) return null;
-  return COLOR_ALIASES[words[words.length - 1]] ?? null;
+  if (words.length === 0) return null;
+  const lastWord = words[words.length - 1];
+  return COLOR_ALIASES[lastWord] ?? fuzzyWordLookup(lastWord, COLOR_ALIASES);
 }
 
 export function canonicalizeColor(raw: string | null | undefined): string | null {

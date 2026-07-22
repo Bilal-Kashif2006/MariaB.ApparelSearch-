@@ -25,7 +25,10 @@ export type RawIntent = z.infer<typeof RawIntentSchema>;
 
 export const ConversationPlanSchema = z.object({
   action: z.enum(['search', 'clarify', 'unsupported']),
-  searchScope: z.enum(['new', 'refine']),
+  // Older/less literal model responses can omit this newly-added field.
+  // Defaulting to a new search is the safe choice: it prevents stale filters
+  // from leaking into a shopper's fresh request.
+  searchScope: z.enum(['new', 'refine']).optional().default('new'),
   question: z.string().nullable().optional(),
   intent: RawIntentSchema,
 });

@@ -98,7 +98,11 @@ async function resolveIntentAndProducts(
   // A model may occasionally choose "search" while extracting no usable
   // catalog facet. Fail safely into a helpful question instead of treating
   // that as permission to show arbitrary New In products.
-  if (plan.action !== 'search' || isEmptyCatalogIntent(canonicalIntent)) {
+  // An extracted, canonical Bareeze facet is already enough to search. The
+  // model may still choose "clarify" for a named occasion to ask budget,
+  // but that creates needless friction: "Eid", "Mehndi", or "Nikkah" is
+  // a useful catalog request on its own.
+  if (plan.action === 'unsupported' || isEmptyCatalogIntent(canonicalIntent)) {
     const isUnsupported = plan.action === 'unsupported';
     return {
       intent: guardedIntent,

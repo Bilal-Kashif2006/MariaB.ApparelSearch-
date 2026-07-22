@@ -159,6 +159,10 @@ describe('canonicalizeFabric', () => {
     expect(canonicalizeFabric('chiffon dress')).toBe('chiffon');
   });
 
+  it('tolerates a close fabric spelling mistake', () => {
+    expect(canonicalizeFabric('chifon suit')).toBe('chiffon');
+  });
+
   it('maps fabrics that only exist as a catalog attribute, not a live collection page', () => {
     // Regression: polyester/linen/pashmina are real, crawl-verified Fabric
     // attribute values (21/9/1 products) but canonicalizeFabric used to

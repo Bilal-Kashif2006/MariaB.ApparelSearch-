@@ -65,7 +65,7 @@ Decision rules:
 - Set "searchScope" to "new" when this is a new shopping goal, a newly named occasion, or an answer to a clarification that replaces the earlier need. "new" discards old filters. Set it to "refine" only when the shopper explicitly adjusts the current result set, such as "cheaper", "green instead", "same style", or "more formal".
 - Use "clarify" when the request is too broad to search responsibly. Ask exactly ONE short, specific question that would most improve the result. Do not ask a checklist of questions.
 - Use "unsupported" only when the request needs a catalogue category Bareeze does not offer or cannot verify, such as children's or menswear. Explain briefly and offer the nearest helpful next step without recommending unrelated products.
-- The shopper may use English, Urdu, or Roman Urdu. Preserve their wording in intent values; another system normalizes them.
+- The shopper may use English, Urdu, or Roman Urdu. You are responsible for correcting obvious typos, spelling variants, and Roman Urdu transliterations before returning intent. Do not return a misspelled token when you can confidently normalize it (for example, normalize a misspelled wedding occasion or fabric to its common term), but never infer a facet the shopper did not mention.
 - Never use "search" with an empty intent. Never produce product recommendations or prose outside question.`;
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -133,7 +133,30 @@ function tryParse(raw: string): RawIntent | null {
 
 function tryParsePlan(raw: string): ConversationPlan | null {
   try {
-    return ConversationPlanSchema.parse(JSON.parse(raw));
+    const value = JSON.parse(raw) as unknown;
+    const planned = ConversationPlanSchema.safeParse(value);
+    if (planned.success) return planned.data;
+
+    // Graceful compatibility with a model that follows the older intent-only
+    // contract despite being asked for a plan. A usable facet is enough to
+    // search; an empty object remains a clarification, never random picks.
+    const intentOnly = RawIntentSchema.safeParse(value);
+    if (intentOnly.success && Object.keys(intentOnly.data).length > 0) {
+      return { action: 'search', searchScope: 'new', question: null, intent: intentOnly.data };
+    }
+    if (value && typeof value === 'object' && 'intent' in value) {
+      const nestedIntent = RawIntentSchema.safeParse((value as { intent: unknown }).intent);
+      if (nestedIntent.success) {
+        const hasFacet = Object.keys(nestedIntent.data).length > 0;
+        return {
+          action: hasFacet ? 'search' : 'clarify',
+          searchScope: 'new',
+          question: hasFacet ? null : 'What occasion or style are you shopping for?',
+          intent: nestedIntent.data,
+        };
+      }
+    }
+    return null;
   } catch {
     return null;
   }

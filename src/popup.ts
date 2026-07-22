@@ -109,16 +109,6 @@ function message(role: ChatMessage['role'], text: string): ChatMessage {
   return { id: crypto.randomUUID(), role, text };
 }
 
-function greetingReply(query: string): string | null {
-  const normalized = query.toLowerCase().replace(/[^a-z' -]+/g, ' ').replace(/\s+/g, ' ').trim();
-  const greetings = new Set([
-    'hey', 'hi', 'hello', 'hiya', 'salam', 'assalam o alaikum', 'assalam-o-alaikum',
-    'how are you', 'hey how are you', "what's up", "how's it going",
-  ]);
-  if (!greetings.has(normalized)) return null;
-  return "I’m here to help you find the right Bareeze look. Is it for everyday wear, Eid, work, winter, or a special occasion?";
-}
-
 
 function setInputError(text: string | null): void {
   inputError.hidden = !text;
@@ -435,20 +425,6 @@ async function beginSearch(query: string, addUserMessage = true): Promise<void> 
 
   const requestId = crypto.randomUUID();
   currentRequestId = requestId;
-
-  const localGreeting = greetingReply(trimmed);
-  if (localGreeting) {
-    setSearching(true, false, 'Bareeze is listening…');
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-    if (currentRequestId !== requestId) return;
-    currentRequestId = null;
-    setSearching(false);
-    messages.push(message('assistant', localGreeting));
-    renderChat();
-    persistConversation();
-    chatInput.focus();
-    return;
-  }
 
   setSearching(true, true, 'Understanding your request…');
   const nextStage = window.setTimeout(() => {

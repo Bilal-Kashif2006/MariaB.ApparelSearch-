@@ -10,17 +10,25 @@ import {
   searchCatalog,
   type CatalogIntent,
 } from './catalog.js';
-import { planShoppingTurn } from './intent.js';
+import { describeSearchFailure, planShoppingTurn } from './intent.js';
 import { CatalogIntentSchema, type RawIntent } from './schema.js';
 import { transcribeAudio } from './transcribe.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024; // 10 MB — generous for a short voice query
 
+// Groq only transcribes voice audio now — text/JSON planning runs on Gemini
+// (see intent.ts) after Groq's free-tier daily token cap made typed search
+// unreliable. Both keys are required: Groq for Whisper, Gemini for planning.
 const apiKey = process.env.GROQ_API_KEY;
 if (!apiKey) {
   throw new Error(
     'GROQ_API_KEY is not set. Copy server/.env.example to server/.env and add your Groq API key before starting the proxy.',
+  );
+}
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error(
+    'GEMINI_API_KEY is not set. Copy server/.env.example to server/.env and add your Gemini API key before starting the proxy.',
   );
 }
 
@@ -84,7 +92,7 @@ async function resolveIntentAndProducts(
   conversationAction: 'search' | 'clarify' | 'unsupported';
   assistantReply: string | null;
 }> {
-  const plan = await planShoppingTurn(groq, transcriptOrText, history);
+  const plan = await planShoppingTurn(transcriptOrText, history);
   const rawIntent = plan.intent;
   const { raw: guardedIntent, negatedFields } = dropNegatedFields(rawIntent, transcriptOrText);
   const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
@@ -179,7 +187,9 @@ app.post(
       res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
     } catch (error) {
       console.error('voice-intent request failed:', error);
-      res.status(502).json({ error: 'Voice search is temporarily unavailable. Try typing your search instead.' });
+      res.status(502).json({
+        error: describeSearchFailure(error, 'Voice search is temporarily unavailable. Try typing your search instead.'),
+      });
     }
   },
 );
@@ -203,7 +213,7 @@ app.post('/text-intent', async (req, res) => {
     res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
   } catch (error) {
     console.error('text-intent request failed:', error);
-    res.status(502).json({ error: 'Smart search is temporarily unavailable. Try again.' });
+    res.status(502).json({ error: describeSearchFailure(error, 'Smart search is temporarily unavailable. Try again.') });
   }
 });
 

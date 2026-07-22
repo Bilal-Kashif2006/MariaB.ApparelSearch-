@@ -1,7 +1,12 @@
-import Groq from 'groq-sdk';
+import { RateLimitError } from 'groq-sdk';
 import { ConversationPlanSchema, RawIntentSchema, type ConversationPlan, type RawIntent } from './schema.js';
 
-const INTENT_MODEL = process.env.GROQ_INTENT_MODEL || 'llama-3.3-70b-versatile';
+// Text/JSON planning runs on Gemini, not Groq — Groq's Whisper transcription
+// (transcribe.ts) is a separate rate-limit bucket and stays on Groq. Voice
+// search still calls into this module after transcription, so both text and
+// voice search share this Gemini path.
+const GEMINI_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-2.5-flash';
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const SYSTEM_PROMPT = `You are a shopping-intent extractor for Bareeze, a Pakistani women's clothing brand.
 
@@ -70,7 +75,19 @@ Decision rules:
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
-export async function extractIntent(client: Groq, transcript: string): Promise<RawIntent> {
+// Thrown by complete() when Gemini responds 429 (RESOURCE_EXHAUSTED). Mirrors
+// groq-sdk's RateLimitError shape closely enough that describeSearchFailure
+// can format both the same way.
+export class GeminiRateLimitError extends Error {
+  readonly retryDelaySeconds: number | null;
+  constructor(message: string, retryDelaySeconds: number | null) {
+    super(message);
+    this.name = 'GeminiRateLimitError';
+    this.retryDelaySeconds = retryDelaySeconds;
+  }
+}
+
+export async function extractIntent(transcript: string): Promise<RawIntent> {
   // Kept as a real, growing message history (rather than a fresh two-message
   // exchange per attempt) so a retry never loses the shopper's actual
   // request — only the *first* reply is discarded, replaced by the
@@ -80,7 +97,7 @@ export async function extractIntent(client: Groq, transcript: string): Promise<R
     { role: 'user', content: `Shopper's request: ${transcript}` },
   ];
 
-  const raw = await complete(client, messages);
+  const raw = await complete(messages);
   const parsed = tryParse(raw);
   if (parsed) return parsed;
 
@@ -89,38 +106,110 @@ export async function extractIntent(client: Groq, transcript: string): Promise<R
     role: 'user',
     content: 'That was not valid JSON matching the required shape. Reply with ONLY the corrected JSON object, no prose.',
   });
-  const retryRaw = await complete(client, messages);
+  const retryRaw = await complete(messages);
   const retryParsed = tryParse(retryRaw);
   if (retryParsed) return retryParsed;
 
-  throw new Error('Groq returned an unparseable/invalid intent response after one retry.');
+  throw new Error('Gemini returned an unparseable/invalid intent response after one retry.');
 }
 
-export async function planShoppingTurn(client: Groq, transcript: string, history: string): Promise<ConversationPlan> {
+export async function planShoppingTurn(transcript: string, history: string): Promise<ConversationPlan> {
   const messages: ChatMessage[] = [
     { role: 'system', content: PLANNER_SYSTEM_PROMPT },
     { role: 'user', content: `Conversation context:\n${history || '(none)'}\n\nNewest shopper message: ${transcript}` },
   ];
-  const raw = await complete(client, messages);
+  const raw = await complete(messages);
   const parsed = tryParsePlan(raw);
   if (parsed) return parsed;
 
   messages.push({ role: 'assistant', content: raw });
   messages.push({ role: 'user', content: 'That was not valid JSON matching the required shape. Reply with ONLY the corrected JSON object.' });
-  const retryRaw = await complete(client, messages);
+  const retryRaw = await complete(messages);
   const retryParsed = tryParsePlan(retryRaw);
   if (retryParsed) return retryParsed;
-  throw new Error('Groq returned an unparseable/invalid shopping plan after one retry.');
+  throw new Error('Gemini returned an unparseable/invalid shopping plan after one retry.');
 }
 
-async function complete(client: Groq, messages: ChatMessage[]): Promise<string> {
-  const response = await client.chat.completions.create({
-    model: INTENT_MODEL,
-    response_format: { type: 'json_object' },
-    temperature: 0.2,
-    messages,
+type GeminiResponse = {
+  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+};
+
+async function complete(messages: ChatMessage[]): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not set.');
+  }
+
+  // Gemini has no "system"/"assistant" roles in `contents` — system prompts
+  // travel in a separate top-level field, and prior assistant turns become
+  // role "model".
+  const systemInstruction = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content)
+    .join('\n\n');
+  const contents = messages
+    .filter((message) => message.role !== 'system')
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: message.content }],
+    }));
+
+  const response = await fetch(`${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents,
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.2,
+        // Thinking tokens would otherwise slow down a plain JSON-extraction
+        // call for no benefit here.
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    }),
   });
-  return response.choices[0]?.message?.content ?? '';
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => '');
+    if (response.status === 429) {
+      throw new GeminiRateLimitError(`Gemini rate limit: ${bodyText}`, parseRetryDelaySeconds(bodyText));
+    }
+    throw new Error(`Gemini request failed (${response.status}): ${bodyText}`);
+  }
+
+  const data = (await response.json()) as GeminiResponse;
+  return data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
+}
+
+// Gemini's 429 body embeds a google.rpc.RetryInfo detail like
+// {"@type":"...RetryInfo","retryDelay":"31s"} — pull the numeric seconds out
+// of that string rather than parsing the whole protobuf-JSON shape.
+function parseRetryDelaySeconds(bodyText: string): number | null {
+  const match = bodyText.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  return match ? Number(match[1]) : null;
+}
+
+function formatWaitMessage(seconds: number | null): string {
+  if (seconds && seconds > 0) {
+    const minutes = Math.max(1, Math.ceil(seconds / 60));
+    return `Daily search limit reached. Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+  }
+  return 'Daily search limit reached. Try again in a few minutes.';
+}
+
+// Both providers can rate-limit a request: Groq's Whisper transcription
+// (transcribe.ts) and Gemini's JSON planning (complete(), above). Without
+// this, either one surfaces as an opaque "temporarily unavailable" — see
+// server/src/index.ts's route handlers for where this wraps the real cause.
+export function describeSearchFailure(error: unknown, fallback: string): string {
+  if (error instanceof RateLimitError) {
+    return formatWaitMessage(Number(error.headers?.get('retry-after')) || null);
+  }
+  if (error instanceof GeminiRateLimitError) {
+    return formatWaitMessage(error.retryDelaySeconds);
+  }
+  return fallback;
 }
 
 function tryParse(raw: string): RawIntent | null {

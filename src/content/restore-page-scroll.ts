@@ -1,8 +1,8 @@
 // Bareeze product pages occasionally retain a responsive-menu scroll lock
-// after navigation in a reduced-width browser viewport (such as alongside a
-// Chrome side panel). This runs only after the shopper explicitly opens a
-// recommendation and restores normal document scrolling; it does not add
-// wheel listeners or intercept any shopper interaction.
+// after navigation in a reduced-width browser viewport. This runs only
+// after the shopper explicitly opens a recommendation and restores normal
+// document scrolling; it does not add wheel listeners or intercept any
+// shopper interaction.
 function restorePageScroll(): void {
   const styleId = 'bareeze-assistant-scroll-recovery';
   document.getElementById(styleId)?.remove();

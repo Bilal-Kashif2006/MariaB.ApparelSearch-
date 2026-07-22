@@ -761,8 +761,8 @@ retryButton.addEventListener('click', () => {
 });
 layoutToggle.addEventListener('click', () => setExpanded(!document.body.classList.contains('is-expanded')));
 checkStoreButton.addEventListener('click', () => void checkActiveStore());
-// Side panels persist while a shopper moves between Bareeze tabs. Keep the
-// store context in sync automatically so they never have to reopen it.
+// Keeps the store context in sync automatically on the rare case the popup
+// stays open across a tab switch (e.g. via keyboard shortcut).
 chrome.tabs.onActivated.addListener(() => void checkActiveStore());
 loadMoreButton.addEventListener('click', () => appendNextProductBatch());
 productsPane.addEventListener(

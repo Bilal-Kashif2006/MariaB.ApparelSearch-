@@ -6,11 +6,6 @@ import type { ListingCard, PopupRequest, PopupResponse, ProductDetail } from './
 
 const BAREEZE_URL_PATTERN = /^https:\/\/(www\.)?bareeze\.com\//;
 
-// An action popup is transient by Chrome design and closes whenever focus
-// moves. The side panel is the shopping workspace: it remains visible while
-// the customer switches between listing and product tabs.
-void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
-
 async function activeBareezeTab(): Promise<chrome.tabs.Tab | null> {
   // Prefer the actually-active tab (the normal case: the shopper clicked
   // the toolbar icon while on bareeze.com). host_permissions already

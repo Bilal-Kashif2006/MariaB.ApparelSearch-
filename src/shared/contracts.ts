@@ -47,13 +47,18 @@ export type PopupRequest =
   | { type: 'OPEN_CATEGORY'; path: string }
   | { type: 'OPEN_PRODUCT'; slug: string }
   | { type: 'ADD_TO_BAG'; slug: string }
+  | { type: 'OPEN_PATH'; path: string }
   | { type: 'CHECK_STORE' };
 
 export type PopupResponse =
   | { type: 'LISTING_RESULT'; cards: ListingCard[]; pageUrl: string }
   | { type: 'PRODUCT_RESULT'; product: ProductDetail; pageUrl: string }
-  | { type: 'PRODUCT_OPENED'; slug: string }
-  | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string }
+  // viewCartUrl/checkoutUrl come from the real cart drawer Bareeze itself
+  // opens right after a successful add — checkoutUrl in particular is a
+  // per-session path (a UUID Bareeze mints for that cart), never a fixed
+  // route, so it can only be read off the page, not constructed here.
+  | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }
+  | { type: 'PATH_OPENED' }
   | { type: 'NOT_A_BAREEZE_PAGE' }
   | { type: 'STORE_OK' }
   | { type: 'ERROR'; error: string };

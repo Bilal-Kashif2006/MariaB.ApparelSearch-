@@ -530,31 +530,56 @@ function showProductDetail(product: ProductDetail): void {
   addButton.textContent = 'Add to Bag';
   const status = document.createElement('p');
   status.className = 'add-status';
+
+  // Only ever shown once a bag genuinely exists — viewCartUrl/checkoutUrl
+  // arrive from ADD_TO_BAG_RESULT (read off Bareeze's own cart drawer;
+  // checkoutUrl is a per-session path Bareeze mints, so it isn't known
+  // until then). checkoutUrl can come back null if the drawer didn't
+  // render in time; falling back to the cart page keeps the button honest
+  // — it still lands the shopper on a real path to checkout, on Bareeze's
+  // own site, rather than promising something this extension can't do.
+  const cartActions = document.createElement('div');
+  cartActions.className = 'cart-actions';
+  cartActions.hidden = true;
+  let viewCartUrl = '/cart';
+  let checkoutUrl: string | null = null;
+  const viewCartButton = document.createElement('button');
+  viewCartButton.type = 'button';
+  viewCartButton.className = 'header-button';
+  viewCartButton.textContent = 'View Cart';
+  viewCartButton.addEventListener('click', () => void sendMessage({ type: 'OPEN_PATH', path: viewCartUrl }));
+  const checkoutButton = document.createElement('button');
+  checkoutButton.type = 'button';
+  checkoutButton.className = 'primary-action';
+  checkoutButton.textContent = 'Checkout';
+  checkoutButton.addEventListener('click', () => void sendMessage({ type: 'OPEN_PATH', path: checkoutUrl ?? viewCartUrl }));
+  cartActions.append(viewCartButton, checkoutButton);
+
   addButton.addEventListener('click', async () => {
     addButton.disabled = true;
     addButton.textContent = 'Adding…';
+    cartActions.hidden = true;
     const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug });
     if (response.type === 'ADD_TO_BAG_RESULT' && response.ok) {
       status.textContent = 'Added to your Bareeze bag.';
       addButton.textContent = 'Added';
+      viewCartUrl = response.viewCartUrl || '/cart';
+      checkoutUrl = response.checkoutUrl ?? null;
+      cartActions.hidden = false;
     } else {
       status.textContent = response.type === 'ADD_TO_BAG_RESULT' ? response.error || 'Could not add to bag.' : 'Could not add to bag.';
       addButton.disabled = false;
       addButton.textContent = 'Add to Bag';
     }
   });
-  productDetailBody.append(addButton, status);
+  productDetailBody.append(addButton, status, cartActions);
   title.focus();
 }
 
 async function openProduct(slug: string): Promise<void> {
   const response = await sendMessage({ type: 'OPEN_PRODUCT', slug });
-  if (response.type === 'PRODUCT_OPENED') {
-    // Keep the compact recommendations visible in the assistant and hand
-    // product interaction to Bareeze's own fully functional product page.
-    messages.push(message('assistant', 'Opened the product on Bareeze. Choose your size and add it to bag there.'));
-    renderChat();
-    persistConversation();
+  if (response.type === 'PRODUCT_RESULT') {
+    showProductDetail(response.product);
   } else {
     messages.push(message('assistant', 'Could not open that product — try again.'));
     renderChat();

@@ -110,16 +110,30 @@ async function navigateActiveTab(path: string): Promise<PopupResponse> {
   return scrapeActiveTab();
 }
 
-// A recommendation click is a hand-off to Bareeze, not an in-extension
-// replica of the product page. Let the shopper use Bareeze's own product
-// UI for gallery, sizes, options, bag, and checkout without injecting a
-// scraper or waiting on the page after navigation.
+// Navigates the shopper's real bareeze.com tab (so gallery, sizes/options,
+// stock, Add to Bag, and checkout are all Bareeze's own live UI, not a
+// stale snapshot) and scrapes it right back for the popup's in-panel detail
+// view — the popup itself never leaves the search results underneath it.
 async function openProduct(slug: string): Promise<PopupResponse> {
   const tab = await resolveTabToNavigate();
   if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
   await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com/${encodeURIComponent(slug)}` });
   restoreProductPageScroll(tab.id);
-  return { type: 'PRODUCT_OPENED', slug };
+  await waitForTabLoad(tab.id);
+  // The SPA still renders its product grid client-side after "complete" fires.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  return scrapeActiveTab();
+}
+
+// Used for View Cart / Checkout: both are a plain hand-off to a path
+// Bareeze itself already produced (either the fixed /cart route or the
+// per-session checkout link read out of the cart drawer), never a page this
+// extension scrapes or renders any UI for.
+async function openPath(path: string): Promise<PopupResponse> {
+  const tab = await resolveTabToNavigate();
+  if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
+  await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com${path}` });
+  return { type: 'PATH_OPENED' };
 }
 
 function restoreProductPageScroll(tabId: number): void {
@@ -152,12 +166,18 @@ async function addToBag(slug: string): Promise<PopupResponse> {
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 
-  const result = await injectAndMessage<{ ok: boolean; error?: string }>(
+  const result = await injectAndMessage<{ ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }>(
     tabId!,
     'addToBag.js',
     { type: 'CLICK_ADD_TO_BAG' }
   );
-  return { type: 'ADD_TO_BAG_RESULT', ok: result?.ok ?? false, error: result?.error };
+  return {
+    type: 'ADD_TO_BAG_RESULT',
+    ok: result?.ok ?? false,
+    error: result?.error,
+    viewCartUrl: result?.viewCartUrl,
+    checkoutUrl: result?.checkoutUrl,
+  };
 }
 
 chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendResponse) => {
@@ -170,6 +190,8 @@ chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendRespon
       sendResponse(await openProduct(message.slug));
     } else if (message.type === 'ADD_TO_BAG') {
       sendResponse(await addToBag(message.slug));
+    } else if (message.type === 'OPEN_PATH') {
+      sendResponse(await openPath(message.path));
     } else if (message.type === 'CHECK_STORE') {
       // Cheaper than SCRAPE_ACTIVE_TAB for a plain support check: no content
       // script injection, just "does a bareeze.com tab exist" (same lookup

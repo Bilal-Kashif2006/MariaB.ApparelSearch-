@@ -104,7 +104,7 @@ describe('planShoppingTurn', () => {
     fakeGemini([
       JSON.stringify({
         action: 'clarify',
-        searchScope: 'new',
+        searchScope: null,
         question: 'What occasion is it for?',
         intent: {},
       }),
@@ -112,9 +112,27 @@ describe('planShoppingTurn', () => {
 
     await expect(planShoppingTurn('I need something nice', 'user: I need something nice')).resolves.toEqual({
       action: 'clarify',
-      searchScope: 'new',
+      searchScope: null,
       question: 'What occasion is it for?',
       intent: {},
+    });
+  });
+
+  it('accepts a clarify plan with searchScope set to null', async () => {
+    fakeGemini([
+      JSON.stringify({
+        action: 'clarify',
+        searchScope: null,
+        question: 'What occasion are you looking to wear pink trousers for?',
+        intent: { color: 'pink', type: 'trousers' },
+      }),
+    ]);
+
+    await expect(planShoppingTurn('pink trousers', '')).resolves.toEqual({
+      action: 'clarify',
+      searchScope: null,
+      question: 'What occasion are you looking to wear pink trousers for?',
+      intent: { color: 'pink', type: 'trousers' },
     });
   });
 

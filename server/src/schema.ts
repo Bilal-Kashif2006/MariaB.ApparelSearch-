@@ -23,15 +23,35 @@ export const RawIntentSchema = z.object({
 
 export type RawIntent = z.infer<typeof RawIntentSchema>;
 
-export const ConversationPlanSchema = z.object({
-  action: z.enum(['search', 'clarify', 'unsupported']),
-  // Older/less literal model responses can omit this newly-added field.
-  // Defaulting to a new search is the safe choice: it prevents stale filters
-  // from leaking into a shopper's fresh request.
+const SearchPlanSchema = z.object({
+  action: z.literal('search'),
+  // Older/less literal model responses can omit this field. Defaulting to a
+  // new search is the safe choice: it prevents stale filters from leaking
+  // into a shopper's fresh request.
   searchScope: z.enum(['new', 'refine']).optional().default('new'),
   question: z.string().nullable().optional(),
   intent: RawIntentSchema,
 });
+
+const ClarifyPlanSchema = z.object({
+  action: z.literal('clarify'),
+  searchScope: z.null().optional(),
+  question: z.string(),
+  intent: RawIntentSchema,
+});
+
+const UnsupportedPlanSchema = z.object({
+  action: z.literal('unsupported'),
+  searchScope: z.null().optional(),
+  question: z.string(),
+  intent: RawIntentSchema,
+});
+
+export const ConversationPlanSchema = z.discriminatedUnion('action', [
+  SearchPlanSchema,
+  ClarifyPlanSchema,
+  UnsupportedPlanSchema,
+]);
 
 export type ConversationPlan = z.infer<typeof ConversationPlanSchema>;
 

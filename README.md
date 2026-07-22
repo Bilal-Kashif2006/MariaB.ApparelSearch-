@@ -114,6 +114,98 @@ Scraping, cart hand-off, typed keyword search, and voice-driven intent
 search are all implemented and build/test clean (`npm run build`, `npm run
 typecheck`, `npm test`).
 
+## Restore `resham_dump (1).dump` into PostgreSQL
+
+The file at `data/resham_dump (1).dump` is a PostgreSQL custom-format dump.
+That means:
+
+- it is a database backup/export created from PostgreSQL
+- it contains schema and/or data from another database
+- it should be restored with `pg_restore`, not by piping it directly into `psql`
+
+This repo now includes a Docker-based restore path so you can load that dump
+into a fresh local PostgreSQL database without installing Postgres directly on
+your machine.
+
+### Files added for this
+
+- `docker-compose.postgres.yml`
+- `scripts/restore-resham-dump.sh`
+
+### What gets created
+
+- Postgres container: `bareeze-postgres`
+- Database: `resham_clone`
+- User: `postgres`
+- Password: `postgres`
+- Port: `5432`
+
+### Prerequisite
+
+Docker Desktop or the Docker daemon must be running before you start.
+
+### Run it
+
+From the repo root:
+
+```bash
+chmod +x scripts/restore-resham-dump.sh
+./scripts/restore-resham-dump.sh
+```
+
+That will:
+
+1. start PostgreSQL in Docker
+2. wait for it to become ready
+3. drop and recreate the target database
+4. restore `data/resham_dump (1).dump` into `resham_clone`
+
+### Optional custom arguments
+
+```bash
+./scripts/restore-resham-dump.sh "<dump-path>" "<db-name>" "<db-user>" "<container-name>"
+```
+
+Example:
+
+```bash
+./scripts/restore-resham-dump.sh "data/resham_dump (1).dump" "resham_stage" "postgres" "bareeze-postgres"
+```
+
+### Connect after restore
+
+Using `psql` from another Postgres client:
+
+```bash
+psql -h localhost -p 5432 -U postgres -d resham_clone
+```
+
+Password:
+
+```text
+postgres
+```
+
+### Useful Docker commands
+
+Start Postgres:
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d
+```
+
+Stop Postgres:
+
+```bash
+docker compose -f docker-compose.postgres.yml down
+```
+
+Stop Postgres and delete the container volume too:
+
+```bash
+docker compose -f docker-compose.postgres.yml down -v
+```
+
 ## Voice-driven intent search
 
 Beyond typed keyword search (`bestCategoryPath`, unchanged), the mic button

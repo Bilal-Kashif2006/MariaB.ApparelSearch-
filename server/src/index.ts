@@ -96,8 +96,12 @@ async function resolveIntentAndProducts(
   const rawIntent = plan.intent;
   const { raw: guardedIntent, negatedFields } = dropNegatedFields(rawIntent, transcriptOrText);
   const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
+  const mergeBaseIntent =
+    plan.action === 'search' && plan.searchScope === 'refine'
+      ? previousIntent
+      : null;
   const { intent: canonicalIntent, priceRelaxRequested, priceRelaxApplied } = mergeCatalogIntent(
-    plan.searchScope === 'new' ? null : previousIntent,
+    mergeBaseIntent,
     freshCatalogIntent,
     transcriptOrText,
     negatedFields,
@@ -213,7 +217,13 @@ app.post('/text-intent', async (req, res) => {
     res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
   } catch (error) {
     console.error('text-intent request failed:', error);
-    res.status(502).json({ error: describeSearchFailure(error, 'Smart search is temporarily unavailable. Try again.') });
+    // Keep provider errors, model output, and stack traces out of the client
+    // response. The detailed cause is logged by intent.ts.
+    res.status(502).json({
+      error: 'Smart search is temporarily unavailable. Try again in a moment.',
+      code: 'SMART_SEARCH_UNAVAILABLE',
+      retryable: true,
+    });
   }
 });
 

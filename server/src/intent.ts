@@ -8,6 +8,22 @@ import { ConversationPlanSchema, RawIntentSchema, type ConversationPlan, type Ra
 const GEMINI_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-2.5-flash';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
+// Enabled by default while diagnosing model/provider issues. Set
+// VERBOSE_LLM_LOGS=false once the proxy is behaving normally.
+const VERBOSE_LLM_LOGS = process.env.VERBOSE_LLM_LOGS !== 'false';
+const MAX_LOGGED_MODEL_OUTPUT = 20_000;
+
+function logModel(event: string, details: Record<string, unknown>): void {
+  if (!VERBOSE_LLM_LOGS) return;
+  console.error(`[gemini] ${event}`, details);
+}
+
+function modelOutputForLog(raw: string): string {
+  return raw.length > MAX_LOGGED_MODEL_OUTPUT
+    ? `${raw.slice(0, MAX_LOGGED_MODEL_OUTPUT)}\n...[truncated]`
+    : raw;
+}
+
 const SYSTEM_PROMPT = `You are a shopping-intent extractor for Bareeze, a Pakistani women's clothing brand.
 
 Given a shopper's spoken or typed request (which may be in English, Urdu, or Roman Urdu), extract these fields as a single JSON object:
@@ -49,11 +65,45 @@ Treat this as a fashion consultation, not a generic keyword search:
 
 The local catalogue has no verified children's or menswear collection. Do not turn those requests into unrelated women's products. Be direct about the scope and offer the closest useful next step. Do not invent product facts, availability, categories, sizing advice, or customer details.
 
-Return ONLY this JSON object:
+Return ONLY one of these JSON objects:
+
+For a searchable request:
 {
-  "action": "search" | "clarify" | "unsupported",
+  "action": "search",
   "searchScope": "new" | "refine",
-  "question": string | null,
+  "question": null,
+  "intent": {
+    "collection": string | null,
+    "fabric": string | null,
+    "color": string | null,
+    "type": string | null,
+    "pieceCount": string | null,
+    "occasion": string | null,
+    "priceMax": number | null
+  }
+}
+
+For a clarification:
+{
+  "action": "clarify",
+  "searchScope": null,
+  "question": string,
+  "intent": {
+    "collection": string | null,
+    "fabric": string | null,
+    "color": string | null,
+    "type": string | null,
+    "pieceCount": string | null,
+    "occasion": string | null,
+    "priceMax": number | null
+  }
+}
+
+For an unsupported request:
+{
+  "action": "unsupported",
+  "searchScope": null,
+  "question": string,
   "intent": {
     "collection": string | null,
     "fabric": string | null,
@@ -70,7 +120,8 @@ Decision rules:
 - Set "searchScope" to "new" when this is a new shopping goal, a newly named occasion, or an answer to a clarification that replaces the earlier need. "new" discards old filters. Set it to "refine" only when the shopper explicitly adjusts the current result set, such as "cheaper", "green instead", "same style", or "more formal".
 - Use "clarify" when the request is too broad to search responsibly. Ask exactly ONE short, specific question that would most improve the result. Do not ask a checklist of questions.
 - Use "unsupported" only when the request needs a catalogue category Bareeze does not offer or cannot verify, such as children's or menswear. Explain briefly and offer the nearest helpful next step without recommending unrelated products.
-- The shopper may use English, Urdu, or Roman Urdu. You are responsible for correcting obvious typos, spelling variants, and Roman Urdu transliterations before returning intent. Do not return a misspelled token when you can confidently normalize it (for example, normalize a misspelled wedding occasion or fabric to its common term), but never infer a facet the shopper did not mention.
+- For "clarify" and "unsupported", set "searchScope" to null.
+- The shopper may use English, Urdu, or Roman Urdu. Preserve their wording in intent values; another system normalizes them.
 - Never use "search" with an empty intent. Never produce product recommendations or prose outside question.`;
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
@@ -88,27 +139,26 @@ export class GeminiRateLimitError extends Error {
 }
 
 export async function extractIntent(transcript: string): Promise<RawIntent> {
-  // Kept as a real, growing message history (rather than a fresh two-message
-  // exchange per attempt) so a retry never loses the shopper's actual
-  // request — only the *first* reply is discarded, replaced by the
-  // correction instruction, while the original transcript stays in context.
   const messages: ChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: `Shopper's request: ${transcript}` },
   ];
 
-  const raw = await complete(messages);
+  const raw = await complete(messages, 'extract-intent:first');
   const parsed = tryParse(raw);
   if (parsed) return parsed;
+  logModel('invalid extract-intent response', { attempt: 1, output: modelOutputForLog(raw) });
 
   messages.push({ role: 'assistant', content: raw });
   messages.push({
     role: 'user',
     content: 'That was not valid JSON matching the required shape. Reply with ONLY the corrected JSON object, no prose.',
   });
-  const retryRaw = await complete(messages);
+
+  const retryRaw = await complete(messages, 'extract-intent:retry');
   const retryParsed = tryParse(retryRaw);
   if (retryParsed) return retryParsed;
+  logModel('invalid extract-intent response', { attempt: 2, output: modelOutputForLog(retryRaw) });
 
   throw new Error('Gemini returned an unparseable/invalid intent response after one retry.');
 }
@@ -118,15 +168,19 @@ export async function planShoppingTurn(transcript: string, history: string): Pro
     { role: 'system', content: PLANNER_SYSTEM_PROMPT },
     { role: 'user', content: `Conversation context:\n${history || '(none)'}\n\nNewest shopper message: ${transcript}` },
   ];
-  const raw = await complete(messages);
+
+  const raw = await complete(messages, 'planner:first');
   const parsed = tryParsePlan(raw);
   if (parsed) return parsed;
+  logModel('invalid planner response', { attempt: 1, output: modelOutputForLog(raw) });
 
   messages.push({ role: 'assistant', content: raw });
   messages.push({ role: 'user', content: 'That was not valid JSON matching the required shape. Reply with ONLY the corrected JSON object.' });
-  const retryRaw = await complete(messages);
+
+  const retryRaw = await complete(messages, 'planner:retry');
   const retryParsed = tryParsePlan(retryRaw);
   if (retryParsed) return retryParsed;
+  logModel('invalid planner response', { attempt: 2, output: modelOutputForLog(retryRaw) });
   throw new Error('Gemini returned an unparseable/invalid shopping plan after one retry.');
 }
 
@@ -134,15 +188,12 @@ type GeminiResponse = {
   candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
 };
 
-async function complete(messages: ChatMessage[]): Promise<string> {
+async function complete(messages: ChatMessage[], requestLabel: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not set.');
   }
 
-  // Gemini has no "system"/"assistant" roles in `contents` — system prompts
-  // travel in a separate top-level field, and prior assistant turns become
-  // role "model".
   const systemInstruction = messages
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
@@ -154,37 +205,53 @@ async function complete(messages: ChatMessage[]): Promise<string> {
       parts: [{ text: message.content }],
     }));
 
-  const response = await fetch(`${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents,
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.2,
-        // Thinking tokens would otherwise slow down a plain JSON-extraction
-        // call for no benefit here.
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    }),
-  });
+  try {
+    const response = await fetch(`${GEMINI_ENDPOINT}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.2,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
 
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => '');
-    if (response.status === 429) {
-      throw new GeminiRateLimitError(`Gemini rate limit: ${bodyText}`, parseRetryDelaySeconds(bodyText));
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => '');
+      logModel('request failed', {
+        request: requestLabel,
+        model: GEMINI_MODEL,
+        status: response.status,
+        body: modelOutputForLog(bodyText),
+      });
+      if (response.status === 429) {
+        throw new GeminiRateLimitError(`Gemini rate limit: ${bodyText}`, parseRetryDelaySeconds(bodyText));
+      }
+      throw new Error(`Gemini request failed (${response.status}): ${bodyText}`);
     }
-    throw new Error(`Gemini request failed (${response.status}): ${bodyText}`);
-  }
 
-  const data = (await response.json()) as GeminiResponse;
-  return data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
+    const data = (await response.json()) as GeminiResponse;
+    const raw = data.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
+    logModel('response', {
+      request: requestLabel,
+      model: GEMINI_MODEL,
+      output: modelOutputForLog(raw),
+    });
+    return raw;
+  } catch (error) {
+    logModel('request failed', {
+      request: requestLabel,
+      model: GEMINI_MODEL,
+      error: error instanceof Error ? { name: error.name, message: error.message } : error,
+    });
+    throw error;
+  }
 }
 
-// Gemini's 429 body embeds a google.rpc.RetryInfo detail like
-// {"@type":"...RetryInfo","retryDelay":"31s"} — pull the numeric seconds out
-// of that string rather than parsing the whole protobuf-JSON shape.
 function parseRetryDelaySeconds(bodyText: string): number | null {
   const match = bodyText.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
   return match ? Number(match[1]) : null;
@@ -198,10 +265,6 @@ function formatWaitMessage(seconds: number | null): string {
   return 'Daily search limit reached. Try again in a few minutes.';
 }
 
-// Both providers can rate-limit a request: Groq's Whisper transcription
-// (transcribe.ts) and Gemini's JSON planning (complete(), above). Without
-// this, either one surfaces as an opaque "temporarily unavailable" — see
-// server/src/index.ts's route handlers for where this wraps the real cause.
 export function describeSearchFailure(error: unknown, fallback: string): string {
   if (error instanceof RateLimitError) {
     return formatWaitMessage(Number(error.headers?.get('retry-after')) || null);
@@ -215,7 +278,10 @@ export function describeSearchFailure(error: unknown, fallback: string): string 
 function tryParse(raw: string): RawIntent | null {
   try {
     return RawIntentSchema.parse(JSON.parse(raw));
-  } catch {
+  } catch (error) {
+    logModel('extract-intent validation failure', {
+      error: error instanceof Error ? error.message : error,
+    });
     return null;
   }
 }
@@ -226,27 +292,38 @@ function tryParsePlan(raw: string): ConversationPlan | null {
     const planned = ConversationPlanSchema.safeParse(value);
     if (planned.success) return planned.data;
 
-    // Graceful compatibility with a model that follows the older intent-only
-    // contract despite being asked for a plan. A usable facet is enough to
-    // search; an empty object remains a clarification, never random picks.
     const intentOnly = RawIntentSchema.safeParse(value);
     if (intentOnly.success && Object.keys(intentOnly.data).length > 0) {
       return { action: 'search', searchScope: 'new', question: null, intent: intentOnly.data };
     }
+
     if (value && typeof value === 'object' && 'intent' in value) {
       const nestedIntent = RawIntentSchema.safeParse((value as { intent: unknown }).intent);
       if (nestedIntent.success) {
         const hasFacet = Object.keys(nestedIntent.data).length > 0;
+        if (hasFacet) {
+          return {
+            action: 'search',
+            searchScope: 'new',
+            question: null,
+            intent: nestedIntent.data,
+          };
+        }
         return {
-          action: hasFacet ? 'search' : 'clarify',
-          searchScope: 'new',
-          question: hasFacet ? null : 'What occasion or style are you shopping for?',
+          action: 'clarify',
+          searchScope: null,
+          question: 'What occasion or style are you shopping for?',
           intent: nestedIntent.data,
         };
       }
     }
+
+    logModel('planner validation failure', { error: 'Planner JSON did not match any accepted schema.' });
     return null;
-  } catch {
+  } catch (error) {
+    logModel('planner validation failure', {
+      error: error instanceof Error ? error.message : error,
+    });
     return null;
   }
 }

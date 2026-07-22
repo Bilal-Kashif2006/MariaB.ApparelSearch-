@@ -265,10 +265,15 @@ against real product data, not decomposed into separate live-site filters.
 `products` in the response is only `null` when nothing was recognized at
 all; in that one case the popup falls back to the live, always-current
 `intentToBareezeUrl` path (e.g. "show me new in") instead of returning the
-whole catalog unfiltered. Clicking any catalog-result card still opens the
-real, current product page on bareeze.com (same `openProduct` flow as
-everywhere else) — only the *listing* step uses the snapshot, never the
-purchase step, so price/stock is always verified live before checkout.
+whole catalog unfiltered.
+
+For customer-facing results, the catalog is deliberately an intelligence
+layer, not a second storefront. The server returns at most five ranked real
+Bareeze products and the extension does not open background tabs while
+searching. Selecting a recommendation explicitly opens its real product
+page, where the customer confirms current price, availability, options,
+bag, and checkout. This keeps the browsing experience quiet and makes the
+live Bareeze page the final authority.
 
 **Matching degrades gracefully instead of dead-ending.** `rankCatalog` in
 `server/src/catalog.ts` only treats price as a true hard constraint (a

@@ -23,6 +23,15 @@ export const RawIntentSchema = z.object({
 
 export type RawIntent = z.infer<typeof RawIntentSchema>;
 
+export const ConversationPlanSchema = z.object({
+  action: z.enum(['search', 'clarify', 'unsupported']),
+  searchScope: z.enum(['new', 'refine']),
+  question: z.string().nullable().optional(),
+  intent: RawIntentSchema,
+});
+
+export type ConversationPlan = z.infer<typeof ConversationPlanSchema>;
+
 // Mirrors CatalogIntent in catalog.ts — the client's own record of the last
 // resolved, canonical intent, sent back on the next turn so a follow-up like
 // "cheaper" or "green instead" can be merged against it (see

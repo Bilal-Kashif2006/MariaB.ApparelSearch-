@@ -45,6 +45,7 @@ const contentScriptOptions = {
     scrapeListing: path.join(root, 'src/content/scrape-listing.ts'),
     scrapeProduct: path.join(root, 'src/content/scrape-product.ts'),
     addToBag: path.join(root, 'src/content/add-to-bag.ts'),
+    restorePageScroll: path.join(root, 'src/content/restore-page-scroll.ts'),
   },
   bundle: true,
   format: 'iife',

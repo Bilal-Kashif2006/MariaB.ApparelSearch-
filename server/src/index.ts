@@ -10,7 +10,7 @@ import {
   searchCatalog,
   type CatalogIntent,
 } from './catalog.js';
-import { extractIntent } from './intent.js';
+import { planShoppingTurn } from './intent.js';
 import { CatalogIntentSchema, type RawIntent } from './schema.js';
 import { transcribeAudio } from './transcribe.js';
 
@@ -73,6 +73,7 @@ function parsePreviousIntent(raw: unknown): CatalogIntent | null {
 async function resolveIntentAndProducts(
   transcriptOrText: string,
   previousIntent: CatalogIntent | null,
+  history = '',
 ): Promise<{
   intent: RawIntent;
   canonicalIntent: CatalogIntent;
@@ -80,33 +81,58 @@ async function resolveIntentAndProducts(
   relaxed: boolean;
   priceRelaxRequested: boolean;
   priceRelaxApplied: boolean;
+  conversationAction: 'search' | 'clarify' | 'unsupported';
+  assistantReply: string | null;
 }> {
-  const rawIntent = await extractIntent(groq, transcriptOrText);
+  const plan = await planShoppingTurn(groq, transcriptOrText, history);
+  const rawIntent = plan.intent;
   const { raw: guardedIntent, negatedFields } = dropNegatedFields(rawIntent, transcriptOrText);
   const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
   const { intent: canonicalIntent, priceRelaxRequested, priceRelaxApplied } = mergeCatalogIntent(
-    previousIntent,
+    plan.searchScope === 'new' ? null : previousIntent,
     freshCatalogIntent,
     transcriptOrText,
     negatedFields,
   );
 
-  if (isEmptyCatalogIntent(canonicalIntent)) {
-    return { intent: guardedIntent, canonicalIntent, products: null, relaxed: false, priceRelaxRequested, priceRelaxApplied };
-  }
-  try {
-    const result = searchCatalog(canonicalIntent);
+  // A model may occasionally choose "search" while extracting no usable
+  // catalog facet. Fail safely into a helpful question instead of treating
+  // that as permission to show arbitrary New In products.
+  if (plan.action !== 'search' || isEmptyCatalogIntent(canonicalIntent)) {
+    const isUnsupported = plan.action === 'unsupported';
     return {
       intent: guardedIntent,
       canonicalIntent,
-      products: result.products,
+      products: null,
+      relaxed: false,
+      priceRelaxRequested,
+      priceRelaxApplied,
+      conversationAction: isUnsupported ? 'unsupported' : 'clarify',
+      assistantReply: plan.question || (isUnsupported
+        ? "I can't verify a suitable Bareeze category for that request. Tell me what type of item or occasion you have in mind."
+        : 'What is the occasion or style you are shopping for?'),
+    };
+  }
+
+  try {
+    const result = searchCatalog(canonicalIntent);
+    // The extension is a concise recommendation layer, not a duplicate
+    // storefront. Keep the ranked response to five real catalog products;
+    // the shopper explicitly opens the live page for final confirmation.
+    const products = result.products.slice(0, 5);
+    return {
+      intent: guardedIntent,
+      canonicalIntent,
+      products,
       relaxed: result.relaxed,
       priceRelaxRequested,
       priceRelaxApplied,
+      conversationAction: 'search',
+      assistantReply: null,
     };
   } catch (error) {
     console.error('Local catalog search failed (was data/bareeze-catalog.db built?):', error);
-    return { intent: guardedIntent, canonicalIntent, products: null, relaxed: false, priceRelaxRequested, priceRelaxApplied };
+    return { intent: guardedIntent, canonicalIntent, products: [], relaxed: false, priceRelaxRequested, priceRelaxApplied, conversationAction: 'search', assistantReply: null };
   }
 }
 
@@ -144,9 +170,9 @@ app.post(
         res.status(422).json({ error: 'Could not make out anything in that recording. Try again.' });
         return;
       }
-      const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied } =
+      const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply } =
         await resolveIntentAndProducts(transcript, previousIntent);
-      res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied });
+      res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
     } catch (error) {
       console.error('voice-intent request failed:', error);
       res.status(502).json({ error: 'Voice search is temporarily unavailable. Try typing your search instead.' });
@@ -158,18 +184,19 @@ app.post(
 // catalog-match pipeline, minus the transcription step, so typed queries get
 // the same occasion-aware matching voice search does.
 app.post('/text-intent', async (req, res) => {
-  const body = req.body as { text?: unknown; previousIntent?: unknown } | undefined;
+  const body = req.body as { text?: unknown; previousIntent?: unknown; history?: unknown } | undefined;
   const text = body?.text;
   if (typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'No search text received.' });
     return;
   }
   const previousIntent = parsePreviousIntent(body?.previousIntent);
+  const history = typeof body?.history === 'string' ? body.history.slice(-4_000) : '';
 
   try {
-    const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied } =
-      await resolveIntentAndProducts(text, previousIntent);
-    res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied });
+    const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply } =
+      await resolveIntentAndProducts(text, previousIntent, history);
+    res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
   } catch (error) {
     console.error('text-intent request failed:', error);
     res.status(502).json({ error: 'Smart search is temporarily unavailable. Try again.' });

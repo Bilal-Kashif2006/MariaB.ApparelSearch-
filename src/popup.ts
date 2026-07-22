@@ -32,6 +32,8 @@ interface ServerIntentResult {
   relaxed: boolean;
   priceRelaxRequested: boolean;
   priceRelaxApplied: boolean;
+  conversationAction: 'search' | 'clarify' | 'unsupported';
+  assistantReply: string | null;
 }
 
 function mustElement<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -81,7 +83,7 @@ const checkStoreButton = mustElement<HTMLButtonElement>('check-store');
 const welcomeMessage: ChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  text: 'Tell me what you want from Bareeze. After the first search, keep refining with messages like "cheaper," "green instead," or "something more festive."',
+  text: 'I’m your Bareeze Style Assistant. Tell me the occasion, colour, fabric, or budget you have in mind, and I’ll help you find the right look.',
 };
 
 let messages: ChatMessage[] = [welcomeMessage];
@@ -97,7 +99,7 @@ let visibleProductCount = 0;
 let loadingMoreProducts = false;
 let productPaneHasScrolled = false;
 
-const PRODUCT_BATCH_SIZE = 8;
+const PRODUCT_BATCH_SIZE = 5;
 
 function sendMessage(msg: PopupRequest): Promise<PopupResponse> {
   return chrome.runtime.sendMessage(msg);
@@ -114,8 +116,9 @@ function greetingReply(query: string): string | null {
     'how are you', 'hey how are you', "what's up", "how's it going",
   ]);
   if (!greetings.has(normalized)) return null;
-  return "I'm doing well, thanks! What are you shopping for today? You can start with a color, fabric, occasion, or budget.";
+  return "I’m here to help you find the right Bareeze look. Is it for everyday wear, Eid, work, winter, or a special occasion?";
 }
+
 
 function setInputError(text: string | null): void {
   inputError.hidden = !text;
@@ -185,7 +188,9 @@ function recognizedFacetCount(intent: CanonicalIntent): number {
 function updateProductFeedControls(): void {
   const total = currentProducts?.length || 0;
   const hasMore = visibleProductCount < total;
-  productFeedControls.hidden = total === 0;
+  // The assistant is intentionally a concise recommendation layer, not a
+  // second storefront. Server results are capped at five verified picks.
+  productFeedControls.hidden = true;
   loadMoreButton.hidden = !hasMore;
   loadMoreButton.disabled = loadingMoreProducts;
   loadMoreButton.classList.toggle('is-loading', loadingMoreProducts);
@@ -195,10 +200,10 @@ function updateProductFeedControls(): void {
   productFeedStatus.textContent = hasMore
     ? `Showing ${visibleProductCount} of ${total} matches.`
     : total > 0
-      ? `All ${total} matches loaded.`
+      ? `${total} curated top pick${total === 1 ? '' : 's'}.`
       : '';
   if (currentProducts) {
-    resultSummary.textContent = hasMore ? `Showing ${visibleProductCount} of ${total}` : `${total} product${total === 1 ? '' : 's'}`;
+    resultSummary.textContent = hasMore ? `Showing ${visibleProductCount} of ${total}` : `${total} curated top pick${total === 1 ? '' : 's'}`;
   }
 }
 
@@ -254,12 +259,14 @@ function renderResults(products: ListingCard[] | null, relaxed: boolean): void {
       intentChips.append(chip);
     }
   }
-  notice.hidden = !relaxed;
-  notice.textContent = relaxed ? 'No exact match — showing the closest related products instead.' : '';
+  notice.hidden = false;
+  notice.textContent = relaxed
+    ? 'No exact match — these are the closest curated alternatives.'
+    : 'Curated from the Bareeze catalog. Confirm price and availability on the product page.';
   appendNextProductBatch(true);
   noMatches.hidden = products.length > 0;
   productList.hidden = products.length === 0;
-  resultSummary.textContent = `${products.length} product${products.length === 1 ? '' : 's'}`;
+  resultSummary.textContent = `${products.length} curated top pick${products.length === 1 ? '' : 's'}`;
   chatInput.placeholder = 'Refine these results…';
 }
 
@@ -329,7 +336,7 @@ function buildAssistantReply(result: ServerIntentResult, unmatched: string[]): s
         : `No exact match, but here ${products.length === 1 ? 'is' : 'are'} ${products.length} close option${products.length === 1 ? '' : 's'}.`,
     );
   } else {
-    parts.push(`Found ${products.length} match${products.length === 1 ? '' : 'es'}.`);
+    parts.push(`Found ${products.length} curated top pick${products.length === 1 ? '' : 's'}.`);
   }
 
   if (unmatched.length > 0) {
@@ -345,10 +352,17 @@ function buildAssistantReply(result: ServerIntentResult, unmatched: string[]): s
 
 async function fetchLiveNewIn(): Promise<ListingCard[]> {
   const response = await sendMessage({ type: 'OPEN_CATEGORY', path: '/new-in' });
-  return response.type === 'LISTING_RESULT' ? response.cards : [];
+  return response.type === 'LISTING_RESULT' ? response.cards.slice(0, PRODUCT_BATCH_SIZE) : [];
 }
 
 async function applyServerResult(result: ServerIntentResult): Promise<void> {
+  if (result.conversationAction !== 'search') {
+    messages.push(message('assistant', result.assistantReply || 'What would you like help finding?'));
+    renderChat();
+    persistConversation();
+    chatInput.focus();
+    return;
+  }
   currentIntent = result.canonicalIntent;
 
   let products = result.products;
@@ -362,7 +376,7 @@ async function applyServerResult(result: ServerIntentResult): Promise<void> {
   const { unmatched } = summarizeIntentMatch(result.intent, shoppingIntent);
 
   renderResults(products, relaxed);
-  messages.push(message('assistant', buildAssistantReply({ ...result, products: result.products }, unmatched)));
+  messages.push(message('assistant', buildAssistantReply({ ...result, products }, unmatched)));
   renderChat();
   persistConversation();
   mustElement('products-title').focus();
@@ -379,7 +393,11 @@ async function fetchTextIntent(text: string): Promise<
     const response = await fetch(`${VOICE_API_BASE_URL}/text-intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, previousIntent: currentIntent }),
+      body: JSON.stringify({
+        text,
+        previousIntent: currentIntent,
+        history: messages.slice(-8).map((item) => `${item.role}: ${item.text}`).join('\n'),
+      }),
       signal: controller.signal,
     });
     const payload: unknown = await response.json().catch(() => ({}));
@@ -493,7 +511,7 @@ function hideProductDetail(): void {
   notice.hidden = !currentRelaxed;
   productsEmpty.hidden = currentProducts !== null;
   productList.hidden = !currentProducts || currentProducts.length === 0;
-  productFeedControls.hidden = !currentProducts || currentProducts.length === 0;
+  productFeedControls.hidden = true;
   noMatches.hidden = !currentProducts || currentProducts.length > 0;
 }
 
@@ -554,9 +572,13 @@ function showProductDetail(product: ProductDetail): void {
 }
 
 async function openProduct(slug: string): Promise<void> {
-  const response = await sendMessage({ type: 'OPEN_CATEGORY', path: `/${slug}` });
-  if (response.type === 'PRODUCT_RESULT') {
-    showProductDetail(response.product);
+  const response = await sendMessage({ type: 'OPEN_PRODUCT', slug });
+  if (response.type === 'PRODUCT_OPENED') {
+    // Keep the compact recommendations visible in the assistant and hand
+    // product interaction to Bareeze's own fully functional product page.
+    messages.push(message('assistant', 'Opened the product on Bareeze. Choose your size and add it to bag there.'));
+    renderChat();
+    persistConversation();
   } else {
     messages.push(message('assistant', 'Could not open that product — try again.'));
     renderChat();
@@ -763,6 +785,9 @@ retryButton.addEventListener('click', () => {
 });
 layoutToggle.addEventListener('click', () => setExpanded(!document.body.classList.contains('is-expanded')));
 checkStoreButton.addEventListener('click', () => void checkActiveStore());
+// Side panels persist while a shopper moves between Bareeze tabs. Keep the
+// store context in sync automatically so they never have to reopen it.
+chrome.tabs.onActivated.addListener(() => void checkActiveStore());
 loadMoreButton.addEventListener('click', () => appendNextProductBatch());
 productsPane.addEventListener(
   'scroll',

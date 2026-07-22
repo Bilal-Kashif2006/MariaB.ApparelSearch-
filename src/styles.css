@@ -275,3 +275,385 @@ h2 { margin-bottom: 7px; font-size: 17px; line-height: 1.15; }
   .products-toolbar { align-items: start; flex-direction: column; gap: 7px; }
   .result-summary { max-width: none; text-align: left; }
 }
+
+/* Side-panel workspace ----------------------------------------------------
+   This replaces the old popup-sized two-column layout. The shopping tab
+   remains the visual storefront; this narrow, persistent panel is the
+   calm companion for conversation and a handful of considered choices. */
+html, body,
+html.is-expanded, body.is-expanded {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  min-height: 0;
+}
+
+:root {
+  --canvas: #f7f4ef;
+  --surface: #fffdf9;
+  --surface-soft: #f3eee7;
+  --ink: #1b2d26;
+  --muted: #637169;
+  --emerald: #0c3b2e;
+  --emerald-hover: #082b21;
+  --emerald-soft: #e3eee8;
+  --line: #ded8cd;
+  --line-strong: #b9b0a3;
+}
+
+.app-shell {
+  background:
+    radial-gradient(circle at 105% -5%, rgba(196, 157, 81, .14), transparent 29%),
+    linear-gradient(145deg, #f9f6f0 0%, var(--canvas) 55%, #f0ede6 100%);
+}
+
+.header {
+  flex-basis: 70px;
+  padding: 0 18px;
+  border-bottom-color: rgba(118, 104, 86, .22);
+  background: rgba(255, 253, 249, .92);
+  backdrop-filter: blur(12px);
+}
+
+.brand-lockup { gap: 10px; }
+.logo { font-size: 28px; letter-spacing: -.055em; }
+.store-context { font-size: 9px; letter-spacing: .025em; }
+.header-button {
+  min-height: 32px;
+  padding: 0 11px;
+  border-color: #cfc5b7;
+  color: var(--emerald);
+  background: rgba(255, 253, 249, .75);
+}
+.square-button { display: none; }
+
+.workspace,
+body.is-expanded .workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: transparent;
+}
+
+.chat-pane {
+  order: -1;
+  flex: 0 0 248px;
+  min-height: 220px;
+  border: 0;
+  border-bottom: 1px solid rgba(118, 104, 86, .22);
+  background: rgba(255, 253, 249, .74);
+}
+.chat-heading {
+  flex-basis: 58px;
+  padding: 12px 18px 10px;
+  border-bottom-color: rgba(118, 104, 86, .14);
+  background: transparent;
+}
+.chat-heading h2 { font-size: 21px; }
+.online-badge {
+  padding: 5px 7px;
+  border: 1px solid #cfe0d6;
+  border-radius: 999px;
+  background: #edf6ef;
+  color: #315943;
+}
+.chat-thread {
+  gap: 7px;
+  padding: 9px 18px;
+  background: transparent;
+}
+.message { max-width: 92%; padding: 8px 10px; font-size: 10px; box-shadow: 0 1px 2px rgba(34, 41, 36, .04); }
+.message.assistant { border-color: #e1d9cf; background: #fffdf9; }
+.message.user { border-color: var(--emerald); background: var(--emerald); }
+.chat-composer {
+  margin: 7px 14px 10px;
+  padding: 8px 9px 7px;
+  border-radius: 13px;
+  border-color: #c9c0b4;
+  box-shadow: 0 5px 18px rgba(57, 45, 32, .08);
+}
+.chat-composer textarea { min-height: 34px; font-size: 10.5px; }
+.composer-actions { margin-top: 2px; }
+.send-button { min-height: 29px; padding: 0 12px; background: var(--emerald); }
+.privacy-note { display: none; }
+.inline-error, .recording-strip, .searching-strip { margin: 6px 14px 0; }
+
+.products-pane {
+  flex: 1 1 auto;
+  padding: 18px;
+  background: transparent;
+}
+.products-toolbar { align-items: start; margin-bottom: 12px; }
+.products-toolbar h1 { font-size: 27px; }
+.eyebrow { margin-bottom: 4px; color: #78623c; font-size: 8px; }
+.result-summary { max-width: 142px; padding-top: 3px; color: #5e6b63; font-size: 8.5px; }
+.chips { gap: 6px; margin-bottom: 12px; }
+.chip { min-height: 24px; border-color: #c9ddd0; background: rgba(236, 246, 239, .82); font-size: 8px; }
+.notice { padding: 9px 10px; border-color: #d9cab0; border-radius: 10px; background: #fff8e7; color: #624d1d; font-size: 9px; }
+
+.products-empty, .no-matches {
+  min-height: 220px;
+  padding: 24px;
+  border: 1px solid #ded5c8;
+  border-radius: 16px;
+  background: rgba(255, 253, 249, .74);
+  box-shadow: 0 8px 24px rgba(66, 52, 36, .05);
+}
+.products-empty h2, .no-matches h2 { font-size: 22px; }
+.empty-thread { margin-bottom: 13px; }
+.empty-thread span { background: #b58a42; }
+
+.product-skeletons, .product-list { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.product-skeleton { height: 152px; border-radius: 14px; }
+.product-card {
+  min-height: 148px;
+  flex-direction: row;
+  gap: 11px;
+  padding: 7px;
+  border-color: #ded5c8;
+  border-radius: 14px;
+  background: rgba(255, 253, 249, .93);
+  box-shadow: 0 5px 16px rgba(55, 45, 34, .06);
+}
+.product-card:hover { border-color: #9e8967; box-shadow: 0 10px 24px rgba(55, 45, 34, .13); }
+.product-media { flex: 0 0 106px; width: 106px; height: 134px; border-radius: 10px; background: #ece5db; }
+.product-body { justify-content: center; padding: 8px 20px 8px 1px; }
+.best-match { margin-bottom: 5px; color: #8a6526; font-size: 7px; }
+.product-title { width: 100%; font-size: 14px; line-height: 1.18; }
+.product-subtitle { margin-top: 5px; font-size: 8.5px; }
+.product-price { margin-top: 7px; color: var(--emerald); font-size: 11px; }
+.card-link-icon { right: 13px; bottom: 13px; width: 15px; height: 15px; }
+
+.product-detail-view { padding-top: 0; }
+.product-detail-view .detail-image { border-radius: 14px; }
+
+@media (max-width: 380px) {
+  .header { padding: 0 14px; }
+  .chat-heading { padding-left: 14px; padding-right: 14px; }
+  .chat-thread { padding-left: 14px; padding-right: 14px; }
+  .products-pane { padding: 14px; }
+  .product-media { flex-basis: 96px; width: 96px; }
+  .product-title { font-size: 13px; }
+}
+
+/* Wide side-panel layout: recommendations stay visible beside the chat,
+   rather than being pushed beneath it. Chrome lets the user resize a side
+   panel; this workspace uses that room as soon as it is available. */
+@media (min-width: 620px) {
+  .workspace,
+  body.is-expanded .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .products-pane {
+    min-height: 0;
+    padding: 18px;
+  }
+
+  .chat-pane {
+    order: 0;
+    min-height: 0;
+    border: 0;
+    border-left: 1px solid rgba(118, 104, 86, .22);
+  }
+
+  .chat-heading { flex-basis: 62px; }
+  .chat-thread { padding: 12px; }
+  .chat-composer { margin: 8px 10px 10px; }
+  .product-media { flex-basis: 96px; width: 96px; height: 126px; }
+  .product-card { min-height: 140px; }
+  .product-title { font-size: 13px; }
+}
+
+/* Keep both work areas in view even at Chrome's narrow default side-panel
+   width. Product cards become deliberately compact rather than being pushed
+   beneath the conversation. */
+.workspace,
+body.is-expanded .workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.17fr) minmax(145px, .83fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+main {
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.workspace { flex: 1 1 auto; }
+.products-pane {
+  height: 100%;
+  min-height: 0;
+  padding: 13px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.chat-pane {
+  order: 0;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-left: 1px solid rgba(118, 104, 86, .22);
+}
+.chat-heading { flex-basis: 57px; padding: 10px; }
+.chat-heading h2 { font-size: 17px; }
+.chat-heading .eyebrow, .online-badge { display: none; }
+.chat-thread { padding: 9px; }
+.message { max-width: 100%; padding: 7px 8px; font-size: 9px; }
+.chat-composer { margin: 7px 8px 8px; padding: 7px; }
+.chat-composer textarea { min-height: 34px; font-size: 9.5px; }
+.composer-icon-button { width: 27px; min-height: 27px; }
+.send-button { min-height: 27px; padding: 0 8px; font-size: 8px; }
+
+.products-toolbar { display: block; margin-bottom: 8px; }
+.products-toolbar h1 { font-size: 22px; }
+.result-summary { max-width: none; margin-top: 5px; text-align: left; }
+.chips { gap: 4px; margin-bottom: 8px; }
+.chip { min-height: 20px; padding: 0 6px; font-size: 7px; }
+.notice { padding: 7px 8px; font-size: 8px; }
+.product-list { gap: 8px; }
+.product-card { min-height: 116px; gap: 7px; padding: 5px; border-radius: 11px; }
+.product-media { flex-basis: 68px; width: 68px; height: 106px; border-radius: 8px; }
+.product-body { padding: 4px 12px 4px 0; }
+.best-match { margin-bottom: 3px; font-size: 6px; }
+.product-title { font-size: 10.5px; }
+.product-subtitle { margin-top: 3px; font-size: 7px; }
+.product-price { margin-top: 4px; font-size: 8px; }
+.card-link-icon { right: 7px; bottom: 7px; width: 11px; height: 11px; }
+.product-detail-view { min-height: min-content; padding-bottom: 28px; }
+
+/* Bareeze editorial skin --------------------------------------------------
+   The storefront itself is almost monochrome: soft grey-white canvas,
+   charcoal type, thin rules and product photography doing the visual work.
+   These final rules intentionally remove the generic assistant gradients,
+   shadows, pills and saturated status colours from the utility UI above. */
+:root {
+  --canvas: #f1f3f2;
+  --surface: #f8faf9;
+  --surface-soft: #f3f5f4;
+  --ink: #171b1a;
+  --muted: #68716d;
+  --emerald: #171b1a;
+  --emerald-hover: #000000;
+  --emerald-soft: #e9edeb;
+  --line: #d7dcda;
+  --line-strong: #bfc6c2;
+  font-family: "Helvetica Neue", Arial, sans-serif;
+}
+
+.app-shell { background: var(--canvas); }
+.header {
+  flex-basis: 70px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  backdrop-filter: none;
+}
+.logo {
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 29px;
+  font-weight: 400;
+  letter-spacing: -.07em;
+}
+.store-context { color: var(--muted); font-size: 9px; font-weight: 600; }
+.store-dot { background: #4a675a; box-shadow: none; }
+.header-button {
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+}
+.header-button:hover { border-color: var(--ink); background: transparent; }
+
+main, .workspace, body.is-expanded .workspace { background: var(--canvas); }
+.products-pane { background: var(--surface-soft); }
+.chat-pane { background: var(--surface); border-left-color: var(--line); }
+.chat-heading { border-bottom-color: var(--line); background: var(--surface); }
+.chat-heading h2,
+h1, h2 {
+  color: var(--ink);
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  font-weight: 500;
+  letter-spacing: -.035em;
+}
+.eyebrow { color: #777d7a; font-size: 7px; font-weight: 700; letter-spacing: .11em; }
+.online-badge { border: 0; border-radius: 0; padding: 0; background: transparent; color: var(--muted); }
+.online-badge span { background: #4a675a; }
+
+.result-summary { color: var(--muted); font-weight: 500; }
+.chips { gap: 4px; }
+.chip {
+  min-height: 19px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: #505956;
+  font-size: 7px;
+  font-weight: 600;
+}
+.notice {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: #f7f8f7;
+  color: #5d6662;
+  font-size: 8px;
+}
+
+.products-empty, .no-matches {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.products-empty h2, .no-matches h2 { font-size: 18px; }
+.empty-thread span { background: #222826; }
+
+.product-card {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
+}
+.product-card:hover { border-color: #68716d; box-shadow: none; }
+.product-media { border-radius: 0; background: #e7eae8; }
+.best-match { color: #616966; letter-spacing: .08em; }
+.product-title { color: var(--ink); font-family: "Helvetica Neue", Arial, sans-serif; font-weight: 600; }
+.product-subtitle { color: var(--muted); }
+.product-price { color: var(--ink); }
+.card-link-icon { color: #6a7370; }
+
+.chat-thread { background: #f4f6f5; }
+.message {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 9px;
+}
+.message.assistant { border-color: var(--line); background: var(--surface); color: #424b47; }
+.message.user { border-color: #202624; background: #202624; color: #fff; }
+.message-label { font-size: 6px; }
+.chat-composer {
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--surface);
+  box-shadow: none;
+}
+.chat-composer:focus-within { border-color: #303735; box-shadow: none; }
+.chat-composer textarea { background: var(--surface); color: var(--ink); }
+.composer-icon-button { border-radius: 0; background: transparent; color: var(--ink); }
+.composer-icon-button:hover { background: #e8ecea; }
+.send-button { border-radius: 0; background: #202624; color: #fff; }
+.send-button:hover { background: #000; }
+.inline-error, .recording-strip, .searching-strip {
+  border-radius: 0;
+  border-color: var(--line);
+  background: #f8f9f8;
+  color: #454d49;
+}

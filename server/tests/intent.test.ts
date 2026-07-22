@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { extractIntent } from '../src/intent.js';
+import { extractIntent, planShoppingTurn } from '../src/intent.js';
 
 function fakeClient(replies: string[]) {
   const create = vi.fn();
@@ -74,5 +74,55 @@ describe('extractIntent', () => {
 
     // Act & Assert
     await expect(extractIntent(client, 'something under five thousand')).rejects.toThrow(/unparseable/);
+  });
+});
+
+describe('planShoppingTurn', () => {
+  it('returns a clarification decision rather than inventing products for a broad request', async () => {
+    const client = fakeClient([
+      JSON.stringify({
+        action: 'clarify',
+        searchScope: 'new',
+        question: 'What occasion is it for?',
+        intent: {},
+      }),
+    ]);
+
+    await expect(planShoppingTurn(client, 'I need something nice', 'user: I need something nice')).resolves.toEqual({
+      action: 'clarify',
+      searchScope: 'new',
+      question: 'What occasion is it for?',
+      intent: {},
+    });
+  });
+
+  it('keeps conversational context available when planning a follow-up', async () => {
+    const client = fakeClient([
+      JSON.stringify({
+        action: 'search',
+        searchScope: 'refine',
+        question: null,
+        intent: { collection: 'formal', color: 'green' },
+      }),
+    ]);
+
+    await planShoppingTurn(client, 'green instead', 'user: I need a formal outfit\nassistant: Which colour do you prefer?');
+
+    const prompt = client.chat.completions.create.mock.calls[0][0].messages[1].content;
+    expect(prompt).toContain('I need a formal outfit');
+    expect(prompt).toContain('green instead');
+  });
+
+  it('gives the planner the real Bareeze niche and verified category scope', async () => {
+    const client = fakeClient([
+      JSON.stringify({ action: 'search', searchScope: 'new', question: null, intent: { occasion: 'eid' } }),
+    ]);
+
+    await planShoppingTurn(client, 'I need something for Eid', '');
+
+    const systemPrompt = client.chat.completions.create.mock.calls[0][0].messages[0].content;
+    expect(systemPrompt).toContain("Pakistani women's fashion");
+    expect(systemPrompt).toContain('casuals, formals, pret, prints, shawls');
+    expect(systemPrompt).toContain("children's or menswear");
   });
 });

@@ -45,12 +45,14 @@ export const CATEGORY_PATHS: Record<string, string> = {
 export type PopupRequest =
   | { type: 'SCRAPE_ACTIVE_TAB' }
   | { type: 'OPEN_CATEGORY'; path: string }
+  | { type: 'OPEN_PRODUCT'; slug: string }
   | { type: 'ADD_TO_BAG'; slug: string }
   | { type: 'CHECK_STORE' };
 
 export type PopupResponse =
   | { type: 'LISTING_RESULT'; cards: ListingCard[]; pageUrl: string }
   | { type: 'PRODUCT_RESULT'; product: ProductDetail; pageUrl: string }
+  | { type: 'PRODUCT_OPENED'; slug: string }
   | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string }
   | { type: 'NOT_A_BAREEZE_PAGE' }
   | { type: 'STORE_OK' }

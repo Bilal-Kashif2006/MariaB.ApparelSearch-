@@ -6,6 +6,11 @@ import type { ListingCard, PopupRequest, PopupResponse, ProductDetail } from './
 
 const BAREEZE_URL_PATTERN = /^https:\/\/(www\.)?bareeze\.com\//;
 
+// An action popup is transient by Chrome design and closes whenever focus
+// moves. The side panel is the shopping workspace: it remains visible while
+// the customer switches between listing and product tabs.
+void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+
 async function activeBareezeTab(): Promise<chrome.tabs.Tab | null> {
   // Prefer the actually-active tab (the normal case: the shopper clicked
   // the toolbar icon while on bareeze.com). host_permissions already
@@ -110,6 +115,34 @@ async function navigateActiveTab(path: string): Promise<PopupResponse> {
   return scrapeActiveTab();
 }
 
+// A recommendation click is a hand-off to Bareeze, not an in-extension
+// replica of the product page. Let the shopper use Bareeze's own product
+// UI for gallery, sizes, options, bag, and checkout without injecting a
+// scraper or waiting on the page after navigation.
+async function openProduct(slug: string): Promise<PopupResponse> {
+  const tab = await resolveTabToNavigate();
+  if (!tab?.id) return { type: 'ERROR', error: 'No tab to navigate.' };
+  await chrome.tabs.update(tab.id, { url: `https://www.bareeze.com/${encodeURIComponent(slug)}` });
+  restoreProductPageScroll(tab.id);
+  return { type: 'PRODUCT_OPENED', slug };
+}
+
+function restoreProductPageScroll(tabId: number): void {
+  const timeout = setTimeout(() => chrome.tabs.onUpdated.removeListener(listener), 12_000);
+  function listener(updatedTabId: number, info: chrome.tabs.TabChangeInfo) {
+    if (updatedTabId !== tabId || info.status !== 'complete') return;
+    chrome.tabs.onUpdated.removeListener(listener);
+    clearTimeout(timeout);
+    // Bareeze hydrates after the browser's load event, so wait briefly for
+    // its app shell to finish applying responsive classes before repairing
+    // a lingering scroll lock.
+    setTimeout(() => {
+      void chrome.scripting.executeScript({ target: { tabId }, files: ['restorePageScroll.js'] }).catch(() => undefined);
+    }, 900);
+  }
+  chrome.tabs.onUpdated.addListener(listener);
+}
+
 async function addToBag(slug: string): Promise<PopupResponse> {
   const targetUrl = `https://www.bareeze.com/${slug}`;
   const existing = await activeBareezeTab();
@@ -138,6 +171,8 @@ chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendRespon
       sendResponse(await scrapeActiveTab());
     } else if (message.type === 'OPEN_CATEGORY') {
       sendResponse(await navigateActiveTab(message.path));
+    } else if (message.type === 'OPEN_PRODUCT') {
+      sendResponse(await openProduct(message.slug));
     } else if (message.type === 'ADD_TO_BAG') {
       sendResponse(await addToBag(message.slug));
     } else if (message.type === 'CHECK_STORE') {

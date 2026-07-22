@@ -73,6 +73,89 @@ export function canonicalizeForCatalog(raw: RawIntent): CatalogIntent {
   };
 }
 
+// --- Multi-turn refinement --------------------------------------------------
+// extractIntent has no idea a turn is a follow-up rather than a fresh
+// request — a shopper who just says "not blue" or "no eid" after an earlier
+// search can come back with color: "blue" / occasion: "eid" from the LLM,
+// because the word itself IS in the utterance even though it's being ruled
+// OUT. Checked against the field's own raw text, not the canonical value —
+// this runs before canonicalizeForCatalog, on exactly what the LLM returned.
+const NEGATION_PATTERN = /\b(not|no|don'?t|doesn'?t|isn'?t|without|except)\b/;
+const NEGATABLE_FIELDS = ['collection', 'fabric', 'color', 'type', 'pieceCount', 'occasion'] as const;
+
+export function dropNegatedFields(raw: RawIntent, utterance: string): RawIntent {
+  // Negation only counts within the same clause — without this split, "not
+  // blue, 3 piece is fine" wrongly vetoed pieceCount too, because "not"
+  // fell inside a fixed-width lookback window that crossed the comma into
+  // an unrelated clause.
+  const clauses = utterance.toLowerCase().split(/[,.;!?]+|\band\b|\bbut\b/);
+  const result = { ...raw };
+  for (const field of NEGATABLE_FIELDS) {
+    const value = result[field];
+    if (typeof value !== 'string' || !value) continue;
+    const valueLower = value.toLowerCase();
+    const clause = clauses.find((c) => c.includes(valueLower));
+    if (!clause) continue;
+    const before = clause.slice(0, clause.indexOf(valueLower));
+    if (NEGATION_PATTERN.test(before)) result[field] = null;
+  }
+  return result;
+}
+
+// Words a shopper uses to ask for a lower price without naming a number —
+// extractIntent can't produce a priceMax for these (there isn't one in the
+// utterance to extract), so acting on it at all requires this explicit,
+// deterministic check rather than hoping the LLM invents a number.
+const RELATIVE_PRICE_DOWN_PHRASES = ['cheaper', 'less expensive', 'more affordable', 'lower budget', 'sasta', 'kam qeemat', 'arzan'];
+
+function requestsLowerPrice(utterance: string): boolean {
+  const lower = utterance.toLowerCase();
+  return RELATIVE_PRICE_DOWN_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
+export interface MergeResult {
+  intent: CatalogIntent;
+  // Honesty signals for the caller to relay in plain language rather than
+  // silently no-op'ing or silently broadening — the same principle
+  // WEDDING_GUEST_FALLBACK_OCCASIONS and hasAttribute's own comments already
+  // apply elsewhere in this file, extended to cover a merge across turns.
+  priceRelaxRequested: boolean; // shopper said something like "cheaper"
+  priceRelaxApplied: boolean; // ...and there was a previous cap to actually lower
+}
+
+// Every facet the fresh turn didn't recognize inherits the previous turn's
+// value instead of being dropped; a facet it DID recognize replaces the old
+// one. That single rule is what makes "green instead" work (color
+// overwrites, everything else survives) with no special handling for the
+// word "instead" at all — and it's also this function's real limit: there's
+// no way to REMOVE a previously-set facet short of overwriting it with a
+// different value or starting a new search (see popup.ts's "New search").
+export function mergeCatalogIntent(previous: CatalogIntent | null, fresh: CatalogIntent, utterance: string): MergeResult {
+  const priceRelaxRequested = requestsLowerPrice(utterance) && fresh.priceMax == null;
+
+  if (!previous) {
+    return { intent: fresh, priceRelaxRequested, priceRelaxApplied: false };
+  }
+
+  const merged: CatalogIntent = {
+    collection: fresh.collection ?? previous.collection,
+    fabric: fresh.fabric ?? previous.fabric,
+    color: fresh.color ?? previous.color,
+    type: fresh.type ?? previous.type,
+    pieceCount: fresh.pieceCount ?? previous.pieceCount,
+    occasion: fresh.occasion ?? previous.occasion,
+    priceMax: fresh.priceMax ?? previous.priceMax,
+  };
+
+  let priceRelaxApplied = false;
+  if (priceRelaxRequested && previous.priceMax != null) {
+    merged.priceMax = Math.round(previous.priceMax * 0.75);
+    priceRelaxApplied = true;
+  }
+
+  return { intent: merged, priceRelaxRequested, priceRelaxApplied };
+}
+
 export interface CatalogProduct extends ListingCard {
   categories: Set<string>;
   attributes: Set<string>; // "Type:Value" pairs, e.g. "Color:Green"

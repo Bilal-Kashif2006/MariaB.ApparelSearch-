@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   canonicalizeForCatalog,
   canonicalizeOccasion,
+  dropNegatedFields,
   isEmptyCatalogIntent,
   matchesIntent,
+  mergeCatalogIntent,
   rankCatalog,
   type CatalogIntent,
   type CatalogProduct,
 } from '../src/catalog.js';
+import type { RawIntent } from '../src/schema.js';
 
 const EMPTY_INTENT: CatalogIntent = {
   collection: null,
@@ -295,5 +298,100 @@ describe('rankCatalog', () => {
 
     expect(result.relaxed).toBe(false);
     expect(result.products).toEqual([]);
+  });
+});
+
+function rawIntent(overrides: Partial<RawIntent> = {}): RawIntent {
+  return {
+    collection: null, fabric: null, color: null, type: null, pieceCount: null, occasion: null, priceMax: null,
+    ...overrides,
+  };
+}
+
+describe('dropNegatedFields', () => {
+  // extractIntent has no idea a turn is a refinement — it can pick up a
+  // mentioned word as the field's value even when the shopper is ruling it
+  // out, not asking for it.
+  it('drops a field whose own value is negated shortly before it in the utterance', () => {
+    const intent = rawIntent({ color: 'blue' });
+    expect(dropNegatedFields(intent, 'not blue please').color).toBeNull();
+    expect(dropNegatedFields(intent, 'no blue this time').color).toBeNull();
+    expect(dropNegatedFields(intent, "don't want blue").color).toBeNull();
+  });
+
+  it('keeps a field whose value is not negated', () => {
+    const intent = rawIntent({ color: 'blue', occasion: 'eid' });
+    const result = dropNegatedFields(intent, 'blue for eid please');
+    expect(result.color).toBe('blue');
+    expect(result.occasion).toBe('eid');
+  });
+
+  it('only drops the specific field that was actually negated', () => {
+    const intent = rawIntent({ color: 'blue', pieceCount: '3' });
+    const result = dropNegatedFields(intent, 'not blue, 3 piece is fine');
+    expect(result.color).toBeNull();
+    expect(result.pieceCount).toBe('3');
+  });
+
+  it('leaves priceMax untouched (not a negatable string field)', () => {
+    const intent = rawIntent({ priceMax: 5000 });
+    expect(dropNegatedFields(intent, 'not 5000').priceMax).toBe(5000);
+  });
+});
+
+describe('mergeCatalogIntent', () => {
+  it('uses the fresh intent as-is when there is no previous turn', () => {
+    const fresh = { ...EMPTY_INTENT, color: 'GREEN' };
+    const result = mergeCatalogIntent(null, fresh, 'green suit');
+    expect(result.intent).toEqual(fresh);
+    expect(result.priceRelaxRequested).toBe(false);
+    expect(result.priceRelaxApplied).toBe(false);
+  });
+
+  it('inherits every previous facet the fresh turn did not recognize', () => {
+    const previous = { ...EMPTY_INTENT, color: 'GREEN', occasion: 'festive-eid', priceMax: 10000 };
+    const fresh = { ...EMPTY_INTENT }; // recognized nothing new
+    const result = mergeCatalogIntent(previous, fresh, 'hmm');
+    expect(result.intent).toEqual(previous);
+  });
+
+  it('overrides only the facet the fresh turn recognized — "green instead"', () => {
+    const previous = { ...EMPTY_INTENT, color: 'BLUE', occasion: 'festive-eid', priceMax: 10000 };
+    const fresh = { ...EMPTY_INTENT, color: 'GREEN' };
+    const result = mergeCatalogIntent(previous, fresh, 'green instead');
+    expect(result.intent).toEqual({ ...EMPTY_INTENT, color: 'GREEN', occasion: 'festive-eid', priceMax: 10000 });
+  });
+
+  it('lowers a previous price cap when the shopper asks for something cheaper', () => {
+    const previous = { ...EMPTY_INTENT, priceMax: 10000 };
+    const result = mergeCatalogIntent(previous, EMPTY_INTENT, 'do you have anything cheaper?');
+    expect(result.priceRelaxRequested).toBe(true);
+    expect(result.priceRelaxApplied).toBe(true);
+    expect(result.intent.priceMax).toBe(7500);
+  });
+
+  it('recognizes Roman Urdu relative-price phrases too', () => {
+    const previous = { ...EMPTY_INTENT, priceMax: 8000 };
+    const result = mergeCatalogIntent(previous, EMPTY_INTENT, 'sasta dikhao');
+    expect(result.priceRelaxApplied).toBe(true);
+    expect(result.intent.priceMax).toBe(6000);
+  });
+
+  it('flags a relax request it could not act on, rather than silently doing nothing', () => {
+    // No previous price cap exists — there's nothing to lower. The caller
+    // (index.ts/popup.ts) uses priceRelaxRequested to say so honestly
+    // instead of pretending the request was satisfied.
+    const result = mergeCatalogIntent(null, EMPTY_INTENT, 'anything cheaper?');
+    expect(result.priceRelaxRequested).toBe(true);
+    expect(result.priceRelaxApplied).toBe(false);
+    expect(result.intent.priceMax).toBeNull();
+  });
+
+  it('does not treat an explicit new price as a relax request, even if "cheaper" was also said', () => {
+    const previous = { ...EMPTY_INTENT, priceMax: 10000 };
+    const fresh = { ...EMPTY_INTENT, priceMax: 4000 };
+    const result = mergeCatalogIntent(previous, fresh, 'something cheaper, under 4000');
+    expect(result.priceRelaxRequested).toBe(false);
+    expect(result.intent.priceMax).toBe(4000);
   });
 });

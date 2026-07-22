@@ -2,9 +2,16 @@ import cors from 'cors';
 import express from 'express';
 import Groq from 'groq-sdk';
 import type { ListingCard } from '../../src/shared/contracts';
-import { canonicalizeForCatalog, isEmptyCatalogIntent, searchCatalog } from './catalog.js';
+import {
+  canonicalizeForCatalog,
+  dropNegatedFields,
+  isEmptyCatalogIntent,
+  mergeCatalogIntent,
+  searchCatalog,
+  type CatalogIntent,
+} from './catalog.js';
 import { extractIntent } from './intent.js';
-import type { RawIntent } from './schema.js';
+import { CatalogIntentSchema, type RawIntent } from './schema.js';
 import { transcribeAudio } from './transcribe.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -36,6 +43,15 @@ app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
 app.use(express.json());
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// Never lets a corrupted/stale client-stored previousIntent break the
+// request — it's a context hint for merging, not something the request
+// should fail over. Anything that doesn't validate is treated the same as
+// "no previous turn" (a fresh search), not an error.
+function parsePreviousIntent(raw: unknown): CatalogIntent | null {
+  const parsed = CatalogIntentSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 // The catalog matches on every recognized facet at once, not just occasion
 // — searchCatalog runs whenever the shopper's intent has anything for it to
 // filter on. null products means "use the live intentToBareezeUrl path
@@ -45,20 +61,51 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // popup never silently substitutes a broader live search for a specific
 // request that came back empty. `relaxed: true` means products is a
 // related/closest-match set, not an exact one — see searchCatalog.
+//
+// previousIntent (the shopper's last resolved, canonical request, echoed
+// back by the client) is what turns a follow-up like "cheaper" or "green
+// instead" into a refinement rather than an unrelated fresh search — see
+// mergeCatalogIntent in catalog.ts for how the two are combined, and
+// dropNegatedFields for why the fresh turn is guarded before that merge.
+// `canonicalIntent` in the response is the merged result: what the popup
+// should display as the current filters AND echo back as previousIntent on
+// the shopper's next message.
 async function resolveIntentAndProducts(
   transcriptOrText: string,
-): Promise<{ intent: RawIntent; products: ListingCard[] | null; relaxed: boolean }> {
-  const intent = await extractIntent(groq, transcriptOrText);
-  const catalogIntent = canonicalizeForCatalog(intent);
-  if (isEmptyCatalogIntent(catalogIntent)) {
-    return { intent, products: null, relaxed: false };
+  previousIntent: CatalogIntent | null,
+): Promise<{
+  intent: RawIntent;
+  canonicalIntent: CatalogIntent;
+  products: ListingCard[] | null;
+  relaxed: boolean;
+  priceRelaxRequested: boolean;
+  priceRelaxApplied: boolean;
+}> {
+  const rawIntent = await extractIntent(groq, transcriptOrText);
+  const guardedIntent = dropNegatedFields(rawIntent, transcriptOrText);
+  const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
+  const { intent: canonicalIntent, priceRelaxRequested, priceRelaxApplied } = mergeCatalogIntent(
+    previousIntent,
+    freshCatalogIntent,
+    transcriptOrText,
+  );
+
+  if (isEmptyCatalogIntent(canonicalIntent)) {
+    return { intent: guardedIntent, canonicalIntent, products: null, relaxed: false, priceRelaxRequested, priceRelaxApplied };
   }
   try {
-    const result = searchCatalog(catalogIntent);
-    return { intent, products: result.products, relaxed: result.relaxed };
+    const result = searchCatalog(canonicalIntent);
+    return {
+      intent: guardedIntent,
+      canonicalIntent,
+      products: result.products,
+      relaxed: result.relaxed,
+      priceRelaxRequested,
+      priceRelaxApplied,
+    };
   } catch (error) {
     console.error('Local catalog search failed (was data/bareeze-catalog.db built?):', error);
-    return { intent, products: null, relaxed: false };
+    return { intent: guardedIntent, canonicalIntent, products: null, relaxed: false, priceRelaxRequested, priceRelaxApplied };
   }
 }
 
@@ -73,6 +120,22 @@ app.post(
     }
 
     const mimeType = req.headers['content-type'] || 'audio/webm';
+    // The body here is raw audio bytes (express.raw), not JSON — there's no
+    // room for a previousIntent field in it, so it travels as a header
+    // instead, URL-encoded JSON (a header value can't safely hold raw JSON
+    // punctuation/whitespace).
+    const previousIntentHeader = req.headers['x-previous-intent'];
+    const previousIntent = parsePreviousIntent(
+      typeof previousIntentHeader === 'string'
+        ? (() => {
+            try {
+              return JSON.parse(decodeURIComponent(previousIntentHeader));
+            } catch {
+              return null;
+            }
+          })()
+        : null,
+    );
 
     try {
       const transcript = await transcribeAudio(groq, audio, mimeType);
@@ -80,8 +143,9 @@ app.post(
         res.status(422).json({ error: 'Could not make out anything in that recording. Try again.' });
         return;
       }
-      const { intent, products, relaxed } = await resolveIntentAndProducts(transcript);
-      res.json({ transcript, intent, products, relaxed });
+      const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied } =
+        await resolveIntentAndProducts(transcript, previousIntent);
+      res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied });
     } catch (error) {
       console.error('voice-intent request failed:', error);
       res.status(502).json({ error: 'Voice search is temporarily unavailable. Try typing your search instead.' });
@@ -93,15 +157,18 @@ app.post(
 // catalog-match pipeline, minus the transcription step, so typed queries get
 // the same occasion-aware matching voice search does.
 app.post('/text-intent', async (req, res) => {
-  const text = (req.body as { text?: unknown } | undefined)?.text;
+  const body = req.body as { text?: unknown; previousIntent?: unknown } | undefined;
+  const text = body?.text;
   if (typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'No search text received.' });
     return;
   }
+  const previousIntent = parsePreviousIntent(body?.previousIntent);
 
   try {
-    const { intent, products, relaxed } = await resolveIntentAndProducts(text);
-    res.json({ intent, products, relaxed });
+    const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied } =
+      await resolveIntentAndProducts(text, previousIntent);
+    res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied });
   } catch (error) {
     console.error('text-intent request failed:', error);
     res.status(502).json({ error: 'Smart search is temporarily unavailable. Try again.' });

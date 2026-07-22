@@ -257,6 +257,15 @@ Bareeze's own filter UI has no "occasion" facet (no wedding, eid, office,
 party, etc.), so there's no live URL that could ever answer "something for
 a wedding".
 
+The repository includes a portable SQL dump at
+`data/bareeze-catalog.sql` (the point-in-time catalogue snapshot, without
+any credentials). Restore it locally before starting the proxy:
+
+```bash
+mkdir -p data
+sqlite3 data/bareeze-catalog.db < data/bareeze-catalog.sql
+```
+
 `server/src/catalog.ts` is the only thing that reads this DB. Both
 `/voice-intent` and `/text-intent` run every recognized facet — collection,
 fabric, color, type, piece count, occasion, price — through it together, so

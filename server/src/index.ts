@@ -82,12 +82,13 @@ async function resolveIntentAndProducts(
   priceRelaxApplied: boolean;
 }> {
   const rawIntent = await extractIntent(groq, transcriptOrText);
-  const guardedIntent = dropNegatedFields(rawIntent, transcriptOrText);
+  const { raw: guardedIntent, negatedFields } = dropNegatedFields(rawIntent, transcriptOrText);
   const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
   const { intent: canonicalIntent, priceRelaxRequested, priceRelaxApplied } = mergeCatalogIntent(
     previousIntent,
     freshCatalogIntent,
     transcriptOrText,
+    negatedFields,
   );
 
   if (isEmptyCatalogIntent(canonicalIntent)) {

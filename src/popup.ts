@@ -1,363 +1,791 @@
-import { ListingCard, PopupRequest, PopupResponse, ProductDetail } from './shared/contracts';
-import { bestCategoryPath } from './shared/category-search';
-import { renderListingCard } from './ui/product-card';
+import type {
+  CanonicalIntent,
+  ChatMessage,
+  ConversationState,
+  ListingCard,
+  PopupRequest,
+  PopupResponse,
+  ProductDetail,
+} from './shared/contracts';
 import { canonicalizeIntent, type RawIntentFields } from './shared/canonicalize';
-import { intentToBareezeUrl } from './shared/intent-to-url';
 import { summarizeIntentMatch } from './shared/summarize-intent-match';
+import { renderListingCard } from './ui/product-card';
 import { VoiceRecorder } from './voice/voice-recorder';
-import { INTENT_REQUEST_TIMEOUT_MS, MAX_AUDIO_BYTES, VOICE_API_BASE_URL } from './config';
+import {
+  CONVERSATION_KEY,
+  CONVERSATION_MAX_AGE_MS,
+  INTENT_REQUEST_TIMEOUT_MS,
+  LAYOUT_KEY,
+  MAX_AUDIO_BYTES,
+  VOICE_API_BASE_URL,
+} from './config';
 
-// The proxy's raw intent shape now includes occasion — the one facet the
-// local catalog (data/bareeze-catalog.db) can match that Bareeze's own live
-// filter UI has no equivalent for. See server/src/catalog.ts.
+// The proxy's raw intent shape includes occasion — the one facet the local
+// catalog (data/bareeze-catalog.db) matches that Bareeze's own live filter
+// UI has no equivalent for. See server/src/catalog.ts.
 type RawIntentWithOccasion = RawIntentFields & { occasion?: string | null };
 
-const app = document.getElementById('app')!;
-
-function sendMessage(message: PopupRequest): Promise<PopupResponse> {
-  return chrome.runtime.sendMessage(message);
+interface ServerIntentResult {
+  intent: RawIntentWithOccasion;
+  canonicalIntent: CanonicalIntent;
+  products: ListingCard[] | null;
+  relaxed: boolean;
+  priceRelaxRequested: boolean;
+  priceRelaxApplied: boolean;
 }
 
-function renderShell(): { results: HTMLElement; status: HTMLElement } {
-  app.innerHTML = `
-    <div class="header">
-      <span class="brand">Bareeze</span>
-      <div class="search-row">
-        <input id="search" type="text" placeholder="e.g. lawn, formals, shawls..." />
-        <button id="mic-button" type="button" title="Search by voice" aria-pressed="false">🎤</button>
-      </div>
-    </div>
-    <div id="voice-summary" class="voice-summary" hidden></div>
-    <div id="status" class="status"></div>
-    <div id="results" class="results"></div>
-  `;
-  const search = document.getElementById('search') as HTMLInputElement;
-  search.addEventListener('keydown', async (event) => {
-    if (event.key !== 'Enter') return;
-    hideVoiceSummary();
-    await handleTypedSearch(search.value);
-  });
-  wireMicButton();
-  return {
-    results: document.getElementById('results')!,
-    status: document.getElementById('status')!,
+function mustElement<T extends HTMLElement = HTMLElement>(id: string): T {
+  const element = document.getElementById(id);
+  if (!element) throw new Error(`Missing popup element: ${id}`);
+  return element as T;
+}
+
+const workspaceView = mustElement('workspace-view');
+const blockingView = mustElement('blocking-view');
+const blockingTitle = mustElement('blocking-title');
+const storeContext = mustElement('store-context');
+const storeName = mustElement('store-name');
+const productsToolbar = document.querySelector('.products-toolbar') as HTMLElement;
+const productList = mustElement('product-list');
+const productsPane = mustElement('products-pane');
+const productFeedControls = mustElement('product-feed-controls');
+const productFeedStatus = mustElement('product-feed-status');
+const loadMoreButton = mustElement<HTMLButtonElement>('load-more-products');
+const loadMoreLabel = mustElement('load-more-label');
+const productScrollSentinel = mustElement('product-scroll-sentinel');
+const productsEmpty = mustElement('products-empty');
+const productsLoading = mustElement('products-loading');
+const noMatches = mustElement('no-matches');
+const intentChips = mustElement('intent-chips');
+const resultSummary = mustElement('result-summary');
+const notice = mustElement('notice');
+const productDetailView = mustElement('product-detail-view');
+const productDetailBody = mustElement('product-detail-body');
+const chatThread = mustElement('chat-thread');
+const chatForm = mustElement<HTMLFormElement>('chat-form');
+const chatInput = mustElement<HTMLTextAreaElement>('chat-input');
+const inputError = mustElement('input-error');
+const sendButton = mustElement<HTMLButtonElement>('send-button');
+const micButton = mustElement<HTMLButtonElement>('mic-button');
+const inlineError = mustElement('inline-error');
+const inlineErrorTitle = mustElement('inline-error-title');
+const inlineErrorMessage = mustElement('inline-error-message');
+const retryButton = mustElement<HTMLButtonElement>('retry-button');
+const searchingStrip = mustElement('searching-strip');
+const searchingLabel = mustElement('searching-label');
+const recordingStrip = mustElement('recording-strip');
+const recordingTime = mustElement('recording-time');
+const layoutToggle = mustElement<HTMLButtonElement>('layout-toggle');
+const checkStoreButton = mustElement<HTMLButtonElement>('check-store');
+
+const welcomeMessage: ChatMessage = {
+  id: 'welcome',
+  role: 'assistant',
+  text: 'Tell me what you want from Bareeze. After the first search, keep refining with messages like "cheaper," "green instead," or "something more festive."',
+};
+
+let messages: ChatMessage[] = [welcomeMessage];
+let currentIntent: CanonicalIntent | null = null;
+let currentProducts: ListingCard[] | null = null;
+let currentRelaxed = false;
+let currentRequestId: string | null = null;
+let lastQuery = '';
+let lastRetriableQuery: string | null = null;
+let recordingStartedAt = 0;
+let recordingTimer: number | null = null;
+let visibleProductCount = 0;
+let loadingMoreProducts = false;
+let productPaneHasScrolled = false;
+
+const PRODUCT_BATCH_SIZE = 8;
+
+function sendMessage(msg: PopupRequest): Promise<PopupResponse> {
+  return chrome.runtime.sendMessage(msg);
+}
+
+function message(role: ChatMessage['role'], text: string): ChatMessage {
+  return { id: crypto.randomUUID(), role, text };
+}
+
+function greetingReply(query: string): string | null {
+  const normalized = query.toLowerCase().replace(/[^a-z' -]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const greetings = new Set([
+    'hey', 'hi', 'hello', 'hiya', 'salam', 'assalam o alaikum', 'assalam-o-alaikum',
+    'how are you', 'hey how are you', "what's up", "how's it going",
+  ]);
+  if (!greetings.has(normalized)) return null;
+  return "I'm doing well, thanks! What are you shopping for today? You can start with a color, fabric, occasion, or budget.";
+}
+
+function setInputError(text: string | null): void {
+  inputError.hidden = !text;
+  inputError.textContent = text || '';
+}
+
+function renderChat(isTyping = false): void {
+  chatThread.replaceChildren();
+  for (const item of messages) {
+    const bubble = document.createElement('div');
+    bubble.className = `message ${item.role}`;
+    const label = document.createElement('span');
+    label.className = 'message-label';
+    label.textContent = item.role === 'assistant' ? 'Bareeze' : 'You';
+    const text = document.createElement('span');
+    text.textContent = item.text;
+    bubble.append(label, text);
+    chatThread.append(bubble);
+  }
+  if (isTyping) {
+    const bubble = document.createElement('div');
+    bubble.className = 'message assistant';
+    const label = document.createElement('span');
+    label.className = 'message-label';
+    label.textContent = 'Bareeze';
+    const typing = document.createElement('span');
+    typing.className = 'typing-message';
+    typing.setAttribute('aria-label', 'Bareeze is thinking');
+    typing.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+    bubble.append(label, typing);
+    chatThread.append(bubble);
+  }
+  chatThread.scrollTop = chatThread.scrollHeight;
+}
+
+function titleCase(value: string): string {
+  return value
+    .replace(/[-_]+/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function intentLabels(intent: CanonicalIntent): string[] {
+  const labels: string[] = [];
+  if (intent.collection) labels.push(titleCase(intent.collection));
+  if (intent.fabric) labels.push(titleCase(intent.fabric));
+  if (intent.color) labels.push(titleCase(intent.color));
+  if (intent.type) labels.push(titleCase(intent.type));
+  if (intent.pieceCount) labels.push(titleCase(intent.pieceCount));
+  if (intent.occasion) labels.push(titleCase(intent.occasion));
+  if (intent.priceMax != null) labels.push(`Under Rs. ${intent.priceMax.toLocaleString('en-PK')}`);
+  return labels;
+}
+
+// How many facets a shopper has piled up across refinement turns —
+// mergeCatalogIntent has no way to REMOVE a facet, only replace or add one,
+// so after several refinements a "relaxed" (no-exact-match) result can be
+// ranked against a large combination where it only satisfies one or two of
+// them. That reads as a real match if worded the same as a normal close
+// match, so it's worded differently once enough facets have accumulated.
+function recognizedFacetCount(intent: CanonicalIntent): number {
+  return [intent.collection, intent.fabric, intent.color, intent.type, intent.pieceCount, intent.occasion].filter(Boolean).length;
+}
+
+function updateProductFeedControls(): void {
+  const total = currentProducts?.length || 0;
+  const hasMore = visibleProductCount < total;
+  productFeedControls.hidden = total === 0;
+  loadMoreButton.hidden = !hasMore;
+  loadMoreButton.disabled = loadingMoreProducts;
+  loadMoreButton.classList.toggle('is-loading', loadingMoreProducts);
+  loadMoreLabel.textContent = loadingMoreProducts
+    ? 'Loading products…'
+    : `Load ${Math.min(PRODUCT_BATCH_SIZE, total - visibleProductCount)} more`;
+  productFeedStatus.textContent = hasMore
+    ? `Showing ${visibleProductCount} of ${total} matches.`
+    : total > 0
+      ? `All ${total} matches loaded.`
+      : '';
+  if (currentProducts) {
+    resultSummary.textContent = hasMore ? `Showing ${visibleProductCount} of ${total}` : `${total} product${total === 1 ? '' : 's'}`;
+  }
+}
+
+function appendNextProductBatch(immediate = false): void {
+  if (!currentProducts || loadingMoreProducts || visibleProductCount >= currentProducts.length) return;
+  loadingMoreProducts = true;
+  updateProductFeedControls();
+  const append = () => {
+    if (!currentProducts) return;
+    const start = visibleProductCount;
+    const end = Math.min(start + PRODUCT_BATCH_SIZE, currentProducts.length);
+    for (let index = start; index < end; index += 1) {
+      productList.append(renderListingCard(currentProducts[index], index, openProduct));
+    }
+    visibleProductCount = end;
+    loadingMoreProducts = false;
+    updateProductFeedControls();
   };
+  if (immediate) append();
+  else window.requestAnimationFrame(append);
 }
 
-// --- Voice search --------------------------------------------------------
-// Mic capture happens client-side (VoiceRecorder). The recorded clip is sent
-// as-is to a small local proxy (see server/) that holds the Groq API key and
-// returns { transcript, intent }. The intent is only ever loose,
-// natural-language field values — canonicalizeIntent (already tested against
-// Bareeze's real filter vocabulary) is what turns it into the exact
-// attribute_value strings Bareeze's own filters expect, so a wrong/unmatched
-// LLM guess is dropped rather than sent to Bareeze as garbage.
+function renderResults(products: ListingCard[] | null, relaxed: boolean): void {
+  currentProducts = products;
+  currentRelaxed = relaxed;
+  visibleProductCount = 0;
+  loadingMoreProducts = false;
+  productPaneHasScrolled = false;
+  productsPane.scrollTop = 0;
+  productList.replaceChildren();
+  intentChips.replaceChildren();
+  productsLoading.hidden = true;
+  hideProductDetail();
 
-const recorder = new VoiceRecorder(async (blob) => {
-  await handleRecording(blob);
-});
-
-function wireMicButton(): void {
-  const micButton = document.getElementById('mic-button') as HTMLButtonElement;
-  micButton.addEventListener('click', async () => {
-    if (recorder.isRecording) {
-      recorder.stop();
-      return;
-    }
-    try {
-      await recorder.start();
-      hideVoiceSummary();
-      micButton.classList.add('recording');
-      micButton.setAttribute('aria-pressed', 'true');
-      setStatus('Listening… tap the mic again to stop.');
-    } catch (error) {
-      await handleMicStartError(error);
-    }
-  });
-}
-
-function hideVoiceSummary(): void {
-  const el = document.getElementById('voice-summary');
-  if (el) {
-    el.hidden = true;
-    el.innerHTML = '';
-  }
-}
-
-// The single #status element gets overwritten right after this (first
-// "Loading…", then "N products") — this is a separate, persistent element
-// so what was heard and which filters actually got applied doesn't
-// disappear the moment results render. canonicalizeIntent silently drops
-// any facet it can't match to a real Bareeze filter value, which makes
-// results *broader* than asked for with no other visible sign that
-// happened — this is what makes that visible. Shared by voice and typed
-// smart search, since both now go through the same intent pipeline.
-function showIntentSummary(
-  sourceLabel: string,
-  text: string,
-  rawIntent: RawIntentFields,
-  intent: ReturnType<typeof canonicalizeIntent>,
-  recognizedOccasion: string | null,
-): void {
-  const el = document.getElementById('voice-summary');
-  if (!el) return;
-  const { applied, unmatched } = summarizeIntentMatch(rawIntent, intent);
-  const appliedWithOccasion = recognizedOccasion ? [...applied, `occasion: ${recognizedOccasion}`] : applied;
-  const parts = [`${sourceLabel}: “${escapeHtml(text)}”`];
-  parts.push(
-    appliedWithOccasion.length > 0
-      ? `Filtering by: ${appliedWithOccasion.map(escapeHtml).join(', ')}`
-      : 'No specific filters understood — showing New In.',
-  );
-  if (unmatched.length > 0) {
-    parts.push(`<span class="unmatched">Couldn't match: ${unmatched.map(escapeHtml).join(', ')}</span>`);
-  }
-  el.innerHTML = parts.join('<br>');
-  el.hidden = false;
-}
-
-// Applies a resolved intent from either voice or typed smart search: renders
-// local-catalog products directly whenever the server understood anything
-// to filter on (products !== null — see server/src/catalog.ts, which
-// matches on every recognized facet at once, not just occasion), otherwise
-// falls back to the live, always-current Bareeze-URL path for a genuinely
-// empty intent.
-async function applyIntentResult(
-  sourceLabel: string,
-  heardText: string,
-  rawIntent: RawIntentWithOccasion,
-  products: ListingCard[] | null,
-  relaxed: boolean,
-): Promise<void> {
-  const intent = canonicalizeIntent(rawIntent);
-  showIntentSummary(sourceLabel, heardText, rawIntent, intent, products !== null ? rawIntent.occasion ?? null : null);
-  if (products !== null) {
-    // relaxed means no product matched the whole request — these are the
-    // closest related ones instead (see server/src/catalog.ts). Said
-    // outright rather than labelled the same as an exact match, same
-    // "never silently show something other than what was asked" principle
-    // showIntentSummary already applies to unmatched facets.
-    const statusText =
-      products.length === 0
-        ? 'No products in the local catalog matched that — try broadening your search.'
-        : relaxed
-          ? `No exact match — showing ${products.length} closest option${products.length === 1 ? '' : 's'}`
-          : `${products.length} products`;
-    renderCards(products, statusText);
+  if (!products) {
+    productList.hidden = true;
+    productsEmpty.hidden = false;
+    noMatches.hidden = true;
+    notice.hidden = true;
+    resultSummary.textContent = 'Start with a request in the chat.';
+    productFeedControls.hidden = true;
+    productFeedStatus.textContent = '';
+    chatInput.placeholder = 'Describe what you want…';
     return;
   }
-  const path = intentToBareezeUrl(intent);
-  setStatus('Loading…');
-  const result = await sendMessage({ type: 'OPEN_CATEGORY', path });
-  handleResponse(result);
+
+  productsEmpty.hidden = true;
+  if (currentIntent) {
+    for (const label of intentLabels(currentIntent)) {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = label;
+      intentChips.append(chip);
+    }
+  }
+  notice.hidden = !relaxed;
+  notice.textContent = relaxed ? 'No exact match — showing the closest related products instead.' : '';
+  appendNextProductBatch(true);
+  noMatches.hidden = products.length > 0;
+  productList.hidden = products.length === 0;
+  resultSummary.textContent = `${products.length} product${products.length === 1 ? '' : 's'}`;
+  chatInput.placeholder = 'Refine these results…';
 }
 
-function renderCards(cards: ListingCard[], statusText: string): void {
-  setStatus(statusText);
-  const results = document.getElementById('results')!;
-  results.innerHTML = '';
-  cards.forEach((card) => results.appendChild(renderListingCard(card, openProduct)));
+function persistConversation(): void {
+  const state: ConversationState = {
+    messages,
+    currentIntent,
+    currentProducts,
+    currentRelaxed,
+    lastQuery,
+    updatedAt: Date.now(),
+  };
+  void chrome.storage.local.set({ [CONVERSATION_KEY]: state });
 }
 
-type TextIntentResult =
-  | { kind: 'ok'; intent: RawIntentWithOccasion; products: ListingCard[] | null; relaxed: boolean }
+function setSearching(searching: boolean, showProductLoading = true, label = 'Understanding your request…'): void {
+  if (searching) searchingLabel.textContent = label;
+  searchingStrip.hidden = !searching;
+  sendButton.disabled = searching;
+  micButton.disabled = searching;
+  chatInput.disabled = searching;
+  productsLoading.hidden = !searching || !showProductLoading || currentProducts !== null;
+  productList.setAttribute('aria-busy', String(searching));
+  renderChat(searching);
+}
+
+function hideInlineError(): void {
+  inlineError.hidden = true;
+}
+
+function showInlineError(title: string, text: string, retriable: boolean): void {
+  inlineErrorTitle.textContent = title;
+  inlineErrorMessage.textContent = text;
+  retryButton.hidden = !retriable;
+  inlineError.hidden = false;
+}
+
+// --- Result → chat-message honesty -----------------------------------------
+// Every silent gap here is exactly the failure mode this whole matching
+// system has otherwise been built to avoid (see server/src/catalog.ts's own
+// comments) — a shopper who says "cheaper" with nothing to lower, or whose
+// words didn't map to any real facet, is told so directly instead of the
+// assistant just... not doing anything about it.
+function buildAssistantReply(result: ServerIntentResult, unmatched: string[]): string {
+  const { products, relaxed, priceRelaxRequested, priceRelaxApplied, canonicalIntent } = result;
+  const parts: string[] = [];
+
+  // Said first, not after the result — it's context for the search that
+  // follows ("I lowered the budget, THEN searched"), not an afterthought.
+  // Concrete number, not "a bit": a shopper who asked to go cheaper should
+  // see exactly what cheaper now means.
+  if (priceRelaxApplied && canonicalIntent.priceMax != null) {
+    parts.push(`Lowered the budget to Rs. ${canonicalIntent.priceMax.toLocaleString('en-PK')}.`);
+  } else if (priceRelaxRequested && !priceRelaxApplied) {
+    parts.push("I don't have a price to lower yet — what's your budget?");
+  }
+
+  if (products === null) {
+    parts.push("I couldn't quite place a specific request there — here's what's newly arrived instead.");
+  } else if (products.length === 0) {
+    parts.push("Still couldn't find anything, even loosely related. Tell me what to change and I'll keep digging.");
+  } else if (relaxed) {
+    const weak = recognizedFacetCount(canonicalIntent) >= 3;
+    parts.push(
+      weak
+        ? `No exact match, so these ${products.length} are only loosely related to everything you've asked for so far — tell me which detail matters most and I'll narrow it down.`
+        : `No exact match, but here ${products.length === 1 ? 'is' : 'are'} ${products.length} close option${products.length === 1 ? '' : 's'}.`,
+    );
+  } else {
+    parts.push(`Found ${products.length} match${products.length === 1 ? '' : 'es'}.`);
+  }
+
+  if (unmatched.length > 0) {
+    parts.push(`Couldn't match: ${unmatched.join(', ')}.`);
+  }
+
+  if (products && products.length > 0) {
+    parts.push('What would you like to refine next?');
+  }
+
+  return parts.join(' ');
+}
+
+async function fetchLiveNewIn(): Promise<ListingCard[]> {
+  const response = await sendMessage({ type: 'OPEN_CATEGORY', path: '/new-in' });
+  return response.type === 'LISTING_RESULT' ? response.cards : [];
+}
+
+async function applyServerResult(result: ServerIntentResult): Promise<void> {
+  currentIntent = result.canonicalIntent;
+
+  let products = result.products;
+  let relaxed = result.relaxed;
+  if (products === null) {
+    products = await fetchLiveNewIn();
+    relaxed = false;
+  }
+
+  const shoppingIntent = canonicalizeIntent(result.intent);
+  const { unmatched } = summarizeIntentMatch(result.intent, shoppingIntent);
+
+  renderResults(products, relaxed);
+  messages.push(message('assistant', buildAssistantReply({ ...result, products: result.products }, unmatched)));
+  renderChat();
+  persistConversation();
+  mustElement('products-title').focus();
+}
+
+async function fetchTextIntent(text: string): Promise<
+  | { kind: 'ok'; result: ServerIntentResult }
   | { kind: 'unreachable' }
-  | { kind: 'error'; message: string };
-
-async function fetchTextIntent(text: string): Promise<TextIntentResult> {
+  | { kind: 'error'; message: string }
+> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), INTENT_REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(`${VOICE_API_BASE_URL}/text-intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, previousIntent: currentIntent }),
       signal: controller.signal,
     });
     const payload: unknown = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const message =
+      const errMessage =
         payload && typeof payload === 'object' && 'error' in payload
           ? String((payload as { error: unknown }).error)
           : 'Smart search failed.';
-      return { kind: 'error', message };
+      return { kind: 'error', message: errMessage };
     }
-    const intent = ((payload as { intent?: RawIntentWithOccasion }).intent ?? {}) as RawIntentWithOccasion;
-    const products = ((payload as { products?: ListingCard[] | null }).products ?? null) as ListingCard[] | null;
-    const relaxed = (payload as { relaxed?: boolean }).relaxed ?? false;
-    return { kind: 'ok', intent, products, relaxed };
-  } catch {
+    return { kind: 'ok', result: payload as ServerIntentResult };
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') return { kind: 'error', message: 'Cancelled.' };
     return { kind: 'unreachable' };
   } finally {
     window.clearTimeout(timeout);
   }
 }
 
-// Typed search now tries the same intent-extraction pipeline voice search
-// uses (better multi-facet matching, plus occasion support the live Bareeze
-// URL can't do), falling back to the instant local keyword match only when
-// the local proxy isn't reachable at all — so typed search still works with
-// no backend running, same as before this integration.
-async function handleTypedSearch(text: string): Promise<void> {
-  const trimmed = text.trim();
+async function beginSearch(query: string, addUserMessage = true): Promise<void> {
+  const trimmed = query.trim();
   if (!trimmed) {
-    setStatus('Type something to search for.');
+    setInputError('Describe a color, fabric, occasion, piece count, or budget.');
+    chatInput.focus();
     return;
   }
 
-  setStatus('Searching…');
-  const result = await fetchTextIntent(trimmed);
-  if (result.kind === 'ok') {
-    await applyIntentResult('Searching', trimmed, result.intent, result.products, result.relaxed);
-    return;
-  }
-  if (result.kind === 'error') {
-    setStatus(result.message);
+  hideInlineError();
+  setInputError(null);
+  lastQuery = trimmed;
+  if (addUserMessage) messages.push(message('user', trimmed));
+  chatInput.value = '';
+  renderChat();
+  persistConversation();
+
+  const requestId = crypto.randomUUID();
+  currentRequestId = requestId;
+
+  const localGreeting = greetingReply(trimmed);
+  if (localGreeting) {
+    setSearching(true, false, 'Bareeze is listening…');
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+    if (currentRequestId !== requestId) return;
+    currentRequestId = null;
+    setSearching(false);
+    messages.push(message('assistant', localGreeting));
+    renderChat();
+    persistConversation();
+    chatInput.focus();
     return;
   }
 
-  const path = bestCategoryPath(trimmed);
-  if (!path) {
-    setStatus('No matching Bareeze category — try lawn, formals, casuals, shawls, sale...');
+  setSearching(true, true, 'Understanding your request…');
+  const nextStage = window.setTimeout(() => {
+    if (currentRequestId === requestId) searchingLabel.textContent = 'Checking the catalog…';
+  }, 450);
+
+  const outcome = await fetchTextIntent(trimmed);
+  window.clearTimeout(nextStage);
+  if (currentRequestId !== requestId) return;
+  currentRequestId = null;
+  setSearching(false);
+
+  if (outcome.kind === 'unreachable') {
+    lastRetriableQuery = trimmed;
+    showInlineError('Search interrupted', 'Could not reach the local search proxy. Make sure it is running (see README), then retry.', true);
+    messages.push(message('assistant', 'I could not reach the local search service. Retry, or type your request again.'));
+    renderChat();
+    persistConversation();
     return;
   }
-  setStatus('Loading…');
-  const response = await sendMessage({ type: 'OPEN_CATEGORY', path });
-  handleResponse(response);
+  if (outcome.kind === 'error') {
+    lastRetriableQuery = trimmed;
+    showInlineError('Search interrupted', outcome.message, true);
+    messages.push(message('assistant', `${outcome.message} Retry, or edit the request and try again.`));
+    renderChat();
+    persistConversation();
+    return;
+  }
+
+  lastRetriableQuery = null;
+  await applyServerResult(outcome.result);
 }
+
+async function cancelSearch(): Promise<void> {
+  currentRequestId = null;
+  setSearching(false);
+}
+
+function resetConversation(): void {
+  void cancelSearch();
+  hideInlineError();
+  messages = [welcomeMessage];
+  currentIntent = null;
+  lastQuery = '';
+  lastRetriableQuery = null;
+  renderResults(null, false);
+  renderChat();
+  void chrome.storage.local.remove(CONVERSATION_KEY);
+  chatInput.focus();
+}
+
+// --- Product detail (bareeze-specific: real add-to-bag needs the actual
+// live page, unlike a generic in-grid "Add to Cart" a crawled snapshot
+// alone can't safely offer — see README for why this differs from a
+// straight visual port) --------------------------------------------------
+function hideProductDetail(): void {
+  productDetailView.hidden = true;
+  productsToolbar.hidden = false;
+  intentChips.hidden = false;
+  notice.hidden = !currentRelaxed;
+  productsEmpty.hidden = currentProducts !== null;
+  productList.hidden = !currentProducts || currentProducts.length === 0;
+  productFeedControls.hidden = !currentProducts || currentProducts.length === 0;
+  noMatches.hidden = !currentProducts || currentProducts.length > 0;
+}
+
+function showProductDetail(product: ProductDetail): void {
+  productsToolbar.hidden = true;
+  intentChips.hidden = true;
+  notice.hidden = true;
+  productsEmpty.hidden = true;
+  productList.hidden = true;
+  productFeedControls.hidden = true;
+  noMatches.hidden = true;
+  productDetailView.hidden = false;
+
+  productDetailBody.replaceChildren();
+  if (product.images[0]) {
+    const img = document.createElement('img');
+    img.className = 'detail-image';
+    img.src = product.images[0];
+    img.alt = '';
+    productDetailBody.append(img);
+  }
+  const title = document.createElement('h2');
+  title.id = 'product-detail-title';
+  title.textContent = product.title;
+  productDetailBody.append(title);
+  if (product.sku) {
+    const sku = document.createElement('p');
+    sku.className = 'sku';
+    sku.textContent = `SKU: ${product.sku}`;
+    productDetailBody.append(sku);
+  }
+  const price = document.createElement('p');
+  price.className = 'price';
+  price.textContent = product.price;
+  productDetailBody.append(price);
+
+  const addButton = document.createElement('button');
+  addButton.type = 'button';
+  addButton.className = 'primary-action';
+  addButton.textContent = 'Add to Bag';
+  const status = document.createElement('p');
+  status.className = 'add-status';
+  addButton.addEventListener('click', async () => {
+    addButton.disabled = true;
+    addButton.textContent = 'Adding…';
+    const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug });
+    if (response.type === 'ADD_TO_BAG_RESULT' && response.ok) {
+      status.textContent = 'Added to your Bareeze bag.';
+      addButton.textContent = 'Added';
+    } else {
+      status.textContent = response.type === 'ADD_TO_BAG_RESULT' ? response.error || 'Could not add to bag.' : 'Could not add to bag.';
+      addButton.disabled = false;
+      addButton.textContent = 'Add to Bag';
+    }
+  });
+  productDetailBody.append(addButton, status);
+  title.focus();
+}
+
+async function openProduct(slug: string): Promise<void> {
+  const response = await sendMessage({ type: 'OPEN_CATEGORY', path: `/${slug}` });
+  if (response.type === 'PRODUCT_RESULT') {
+    showProductDetail(response.product);
+  } else {
+    messages.push(message('assistant', 'Could not open that product — try again.'));
+    renderChat();
+    persistConversation();
+  }
+}
+
+// --- Voice ----------------------------------------------------------------
+function extensionForMime(mime: string): string {
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('mp4') || mime.includes('m4a')) return 'm4a';
+  return 'webm';
+}
+
+async function transcribeAndSearch(blob: Blob, mimeType: string): Promise<void> {
+  if (blob.size === 0) {
+    showInlineError('Voice search', 'No audio was recorded. Try again.', false);
+    return;
+  }
+  if (blob.size > MAX_AUDIO_BYTES) {
+    showInlineError('Voice search', 'That recording is too long. Keep it under 15 seconds.', false);
+    return;
+  }
+
+  const requestId = crypto.randomUUID();
+  currentRequestId = requestId;
+  setSearching(true, true, 'Understanding your request…');
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), INTENT_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${VOICE_API_BASE_URL}/voice-intent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': mimeType || 'audio/webm',
+        ...(currentIntent ? { 'X-Previous-Intent': encodeURIComponent(JSON.stringify(currentIntent)) } : {}),
+      },
+      body: blob,
+      signal: controller.signal,
+    });
+    const payload: unknown = await response.json().catch(() => ({}));
+    if (currentRequestId !== requestId) return;
+    currentRequestId = null;
+    setSearching(false);
+    if (!response.ok) {
+      const errMessage = payload && typeof payload === 'object' && 'error' in payload ? String((payload as { error: unknown }).error) : 'Voice search failed.';
+      lastRetriableQuery = null;
+      showInlineError('Voice search', errMessage, false);
+      return;
+    }
+    const transcript = (payload as { transcript?: string }).transcript ?? '';
+    messages.push(message('user', transcript || '(unclear recording)'));
+    lastQuery = transcript;
+    renderChat();
+    persistConversation();
+    await applyServerResult(payload as ServerIntentResult);
+  } catch {
+    if (currentRequestId !== requestId) return;
+    currentRequestId = null;
+    setSearching(false);
+    showInlineError('Voice search', 'Could not reach the local search proxy. Make sure it is running (see README).', true);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function finishRecordingUI(): void {
+  stopRecordingClock();
+  recordingStrip.hidden = true;
+  micButton.classList.remove('recording');
+  micButton.setAttribute('aria-pressed', 'false');
+  micButton.setAttribute('aria-label', 'Start voice request');
+}
+
+function stopRecordingClock(): void {
+  if (recordingTimer !== null) window.clearInterval(recordingTimer);
+  recordingTimer = null;
+}
+
+const recorder = new VoiceRecorder(async (blob, mimeType) => {
+  finishRecordingUI();
+  await transcribeAndSearch(blob, mimeType);
+});
 
 async function handleMicStartError(error: unknown): Promise<void> {
   const name = error instanceof DOMException ? error.name : '';
   if (name === 'NotAllowedError' || name === 'SecurityError') {
     await chrome.tabs.create({ url: chrome.runtime.getURL('mic-setup.html') });
-    setStatus('Finish microphone setup in the new tab, then tap the mic again.');
+    setInputError('Finish microphone setup in the new tab, then tap the mic again.');
     return;
   }
-  setStatus(
+  showInlineError(
+    'Microphone',
     name === 'NotFoundError'
       ? 'No microphone was found. Connect one and try again.'
       : 'Could not start the microphone. Check your browser and system settings.',
+    false,
   );
 }
 
-async function handleRecording(blob: Blob): Promise<void> {
-  const micButton = document.getElementById('mic-button') as HTMLButtonElement | null;
-  micButton?.classList.remove('recording');
-  micButton?.setAttribute('aria-pressed', 'false');
-  // Disabled for the whole processing window, not just the fetch: the
-  // recorder's "stop" event (and isRecording flipping back to false) fires
-  // well before this network round-trip resolves, so without this a second
-  // tap here would start an overlapping voice request racing the first one.
-  if (micButton) micButton.disabled = true;
-
+async function startRecording(): Promise<void> {
+  hideInlineError();
   try {
-    if (blob.size === 0) {
-      setStatus('No audio was recorded. Try again.');
-      return;
-    }
-    if (blob.size > MAX_AUDIO_BYTES) {
-      setStatus('That recording is too long. Keep it under 15 seconds.');
-      return;
-    }
-
-    setStatus('Understanding your request…');
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), INTENT_REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetch(`${VOICE_API_BASE_URL}/voice-intent`, {
-        method: 'POST',
-        headers: { 'Content-Type': blob.type || 'audio/webm' },
-        body: blob,
-        signal: controller.signal,
-      });
-      const payload: unknown = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const error = payload && typeof payload === 'object' && 'error' in payload ? String((payload as { error: unknown }).error) : 'Voice search failed.';
-        setStatus(error);
-        return;
-      }
-      const transcript = (payload as { transcript?: string }).transcript ?? '';
-      const rawIntent = ((payload as { intent?: RawIntentWithOccasion }).intent ?? {}) as RawIntentWithOccasion;
-      const products = ((payload as { products?: ListingCard[] | null }).products ?? null) as ListingCard[] | null;
-      const relaxed = (payload as { relaxed?: boolean }).relaxed ?? false;
-      await applyIntentResult('Heard', transcript, rawIntent, products, relaxed);
-    } catch {
-      setStatus('Voice search needs the local proxy running (see README) — try typing your search instead.');
-    } finally {
-      window.clearTimeout(timeout);
-    }
-  } finally {
-    if (micButton) micButton.disabled = false;
+    await recorder.start();
+    recordingStrip.hidden = false;
+    micButton.classList.add('recording');
+    micButton.setAttribute('aria-pressed', 'true');
+    micButton.setAttribute('aria-label', 'Stop recording');
+    recordingStartedAt = Date.now();
+    const update = () => {
+      const seconds = Math.floor((Date.now() - recordingStartedAt) / 1000);
+      recordingTime.textContent = `0:${String(seconds).padStart(2, '0')}`;
+    };
+    update();
+    recordingTimer = window.setInterval(update, 250);
+  } catch (error) {
+    await handleMicStartError(error);
   }
 }
 
-function setStatus(text: string): void {
-  const el = document.getElementById('status');
-  if (el) el.textContent = text;
+function cancelRecording(): void {
+  recorder.cancel();
+  finishRecordingUI();
 }
 
-function openProduct(slug: string): void {
-  setStatus('Loading…');
-  sendMessage({ type: 'OPEN_CATEGORY', path: `/${slug}` }).then(handleResponse);
+// --- Layout / persistence --------------------------------------------------
+function setExpanded(expanded: boolean): void {
+  document.body.classList.toggle('is-expanded', expanded);
+  document.documentElement.classList.toggle('is-expanded', expanded);
+  layoutToggle.setAttribute('aria-pressed', String(expanded));
+  layoutToggle.setAttribute('aria-label', expanded ? 'Use compact width' : 'Use expanded width');
+  layoutToggle.title = expanded ? 'Use compact width' : 'Use expanded width';
+  void chrome.storage.local.set({ [LAYOUT_KEY]: expanded });
 }
 
-function renderProductDetail(product: ProductDetail): void {
-  const results = document.getElementById('results')!;
-  results.innerHTML = '';
-  const el = document.createElement('div');
-  el.className = 'product-detail';
-  el.innerHTML = `
-    ${product.images[0] ? `<img class="detail-image" src="${product.images[0]}" alt="" />` : ''}
-    <h2>${escapeHtml(product.title)}</h2>
-    ${product.sku ? `<p class="sku">SKU: ${escapeHtml(product.sku)}</p>` : ''}
-    <p class="price">${escapeHtml(product.price)}</p>
-    <button id="add-to-bag">Add to Bag</button>
-    <p id="add-status" class="status"></p>
-  `;
-  results.appendChild(el);
-  const button = document.getElementById('add-to-bag') as HTMLButtonElement;
-  button.addEventListener('click', async () => {
-    button.disabled = true;
-    button.textContent = 'Adding…';
-    const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug });
-    const addStatus = document.getElementById('add-status')!;
-    if (response.type === 'ADD_TO_BAG_RESULT' && response.ok) {
-      addStatus.textContent = 'Added to your Bareeze bag.';
-      button.textContent = 'Added';
-    } else {
-      addStatus.textContent =
-        response.type === 'ADD_TO_BAG_RESULT' ? response.error || 'Could not add to bag.' : 'Could not add to bag.';
-      button.disabled = false;
-      button.textContent = 'Add to Bag';
-    }
-  });
-}
+async function restoreState(): Promise<void> {
+  const durable = await chrome.storage.local.get([CONVERSATION_KEY, LAYOUT_KEY]);
+  setExpanded(durable[LAYOUT_KEY] !== false);
 
-function handleResponse(response: PopupResponse): void {
-  const results = document.getElementById('results')!;
-  results.innerHTML = '';
-
-  if (response.type === 'LISTING_RESULT') {
-    renderCards(
-      response.cards,
-      response.cards.length > 0 ? `${response.cards.length} products` : 'No products matched — try broadening your search.',
-    );
-  } else if (response.type === 'PRODUCT_RESULT') {
-    setStatus('');
-    renderProductDetail(response.product);
-  } else if (response.type === 'NOT_A_BAREEZE_PAGE') {
-    setStatus('Open a page on bareeze.com to browse it here.');
+  const conversation = durable[CONVERSATION_KEY] as ConversationState | undefined;
+  if (conversation && Date.now() - conversation.updatedAt < CONVERSATION_MAX_AGE_MS) {
+    messages = conversation.messages.length ? conversation.messages : [welcomeMessage];
+    currentIntent = conversation.currentIntent;
+    lastQuery = conversation.lastQuery;
+    renderResults(conversation.currentProducts, conversation.currentRelaxed);
   } else {
-    setStatus(response.type === 'ERROR' ? response.error : 'Something went wrong.');
+    renderResults(null, false);
+  }
+  renderChat();
+}
+
+async function checkActiveStore(): Promise<void> {
+  checkStoreButton.disabled = true;
+  checkStoreButton.textContent = 'Checking…';
+  storeContext.classList.remove('is-unsupported');
+  storeName.textContent = 'Checking store…';
+
+  let response: PopupResponse;
+  try {
+    response = await sendMessage({ type: 'CHECK_STORE' });
+  } catch {
+    response = { type: 'ERROR', error: 'Could not check the active tab.' };
+  } finally {
+    checkStoreButton.disabled = false;
+    checkStoreButton.textContent = 'Check current tab';
+  }
+
+  if (response.type === 'STORE_OK') {
+    storeName.textContent = 'Live on bareeze.com';
+    workspaceView.hidden = false;
+    blockingView.hidden = true;
+    chatInput.focus();
+  } else {
+    storeName.textContent = 'Unsupported page';
+    storeContext.classList.add('is-unsupported');
+    workspaceView.hidden = true;
+    blockingView.hidden = false;
+    blockingTitle.focus();
   }
 }
 
-function escapeHtml(value: string): string {
-  const div = document.createElement('div');
-  div.textContent = value;
-  return div.innerHTML;
-}
+// --- Wiring -----------------------------------------------------------------
+chatForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void beginSearch(chatInput.value);
+});
+chatInput.addEventListener('input', () => setInputError(null));
+chatInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    chatForm.requestSubmit();
+  }
+});
+micButton.addEventListener('click', () => {
+  if (recorder.isRecording) recorder.stop();
+  else void startRecording();
+});
+mustElement('stop-recording').addEventListener('click', () => recorder.stop());
+mustElement('cancel-recording').addEventListener('click', cancelRecording);
+mustElement('cancel-search').addEventListener('click', () => void cancelSearch());
+mustElement('new-search').addEventListener('click', resetConversation);
+mustElement('back-to-results').addEventListener('click', hideProductDetail);
+retryButton.addEventListener('click', () => {
+  if (lastRetriableQuery) void beginSearch(lastRetriableQuery, false);
+});
+layoutToggle.addEventListener('click', () => setExpanded(!document.body.classList.contains('is-expanded')));
+checkStoreButton.addEventListener('click', () => void checkActiveStore());
+loadMoreButton.addEventListener('click', () => appendNextProductBatch());
+productsPane.addEventListener(
+  'scroll',
+  () => {
+    if (productsPane.scrollTop > 0) productPaneHasScrolled = true;
+  },
+  { passive: true },
+);
+new IntersectionObserver(
+  (entries) => {
+    if (productPaneHasScrolled && entries.some((entry) => entry.isIntersecting)) appendNextProductBatch();
+  },
+  { root: productsPane, rootMargin: '180px 0px' },
+).observe(productScrollSentinel);
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (recorder.isRecording) cancelRecording();
+  else if (currentRequestId) void cancelSearch();
+});
+window.addEventListener('pagehide', () => {
+  if (recorder.isRecording) recorder.cancel();
+  stopRecordingClock();
+});
 
-renderShell();
-setStatus('Loading…');
-sendMessage({ type: 'SCRAPE_ACTIVE_TAB' }).then(handleResponse);
+void restoreState();
+void checkActiveStore();

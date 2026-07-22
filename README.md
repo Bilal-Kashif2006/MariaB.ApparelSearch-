@@ -144,13 +144,16 @@ Bareeze's exact vocabulary) → `src/shared/canonicalize.ts` (maps that loose
 intent, including Roman Urdu color words, to the exact filter strings above,
 dropping anything unrecognized) → `src/shared/intent-to-url.ts` (pure,
 unit-tested mapper to the URL format above) → the existing `OPEN_CATEGORY`
-message. Typed search (the text box, Enter key) goes through the same
-pipeline via `POST /text-intent` (text in, no audio step), falling back
-instantly to the old local keyword match (`bestCategoryPath`) if the proxy
-isn't reachable at all.
+message. Typed search goes through the same pipeline via `POST
+/text-intent` (text in, no audio step) — see the next section for how both
+now feed a persistent chat, not a one-shot search box. If the proxy isn't
+reachable, the popup says so plainly with a Retry button rather than
+silently degrading to a plain keyword match (an earlier local-only
+fallback, `bestCategoryPath`, is gone along with the single-shot search box
+it belonged to).
 
-**Running the proxy** (required for voice search and the smarter typed
-search; a basic keyword-only typed search still works without it):
+**Running the proxy** (required for both voice and typed search — there is
+no local-only fallback anymore, see above):
 
 ```
 cd server
@@ -159,8 +162,88 @@ cp .env.example .env   # then add your own GROQ_API_KEY
 npm run dev
 ```
 
-If the proxy isn't running, voice search fails with a clear message and
-typed search falls back to plain keyword matching.
+If the proxy isn't running, the popup shows an inline "Search interrupted"
+error with a Retry button instead of a working result.
+
+### Chat-based layout and multi-turn refinement
+
+The popup's layout, verified against the sibling `resham/extension`
+project, is a full port of its visual shell and its persistent-chat
+interaction model — not just its colors. The interaction model itself
+(a chat you keep refining, rather than a single search box that starts
+fresh each time) is what's new here; everything below explains how a
+follow-up like "cheaper" or "green instead" actually gets resolved, and
+where this deliberately still falls short of full parity.
+
+**Layout**: two-pane workspace (`popup.html`, `src/styles.css`) — a
+products pane (chips for the current recognized facets, a paginated
+product grid, 8 at a time with "Load more" + infinite scroll) and a chat
+pane (persistent message thread, mic/send composer, recording/searching
+status strips, inline error with retry). Same emerald/canvas design
+tokens as Resham, same 640×600 popup with an expand-to-800 toggle. State
+(`messages`, the last resolved intent, the last result) is persisted to
+`chrome.storage.local` (`CONVERSATION_KEY`) so the conversation survives
+the popup closing — Chrome can destroy the popup's whole document the
+instant it loses focus, unlike a normal tab.
+
+**Multi-turn refinement** (`server/src/catalog.ts`): the client echoes back
+its last resolved, canonical intent as `previousIntent` on every request.
+`mergeCatalogIntent` combines it with the fresh turn's own intent —
+whatever the fresh turn didn't recognize inherits the previous value,
+whatever it did recognize overrides it. That single rule is what makes
+"green instead" work with no special-casing for the word "instead" at
+all. Two things ride alongside it, both deterministic (no extra LLM
+calls, given how often this session hit Groq's free-tier quota):
+- `dropNegatedFields` catches "not blue"/"no eid"-style utterances,
+  including the case (confirmed against the real model) where the
+  negation word ends up folded straight into the extracted value itself
+  (`color: "not blue"`). Critically, a negated field is force-cleared in
+  the merge, not just nulled in the fresh turn — null-inheriting the
+  previous value would otherwise silently undo the negation entirely,
+  which is exactly what happened before this was caught live: "not blue"
+  after a previous blue search left the color chip completely unchanged.
+- A small word list (`cheaper`, `sasta`, `arzan`, ...) detects relative
+  price language with no explicit number, dropping the previous cap by
+  25%. If there's nothing to lower, the assistant says so ("I don't have
+  a price to lower yet — what's your budget?") instead of quietly doing
+  nothing.
+
+**Known, disclosed gaps in this refinement model** (not silently absent —
+each is either surfaced to the shopper or documented here):
+- There is no way to *remove* a facet with nothing to replace it — only
+  negate-then-leave-unconstrained (clears it) or overwrite it with a new
+  value. "New search" is the actual reset.
+- Facets only ever accumulate or get replaced across turns, never
+  re-evaluated as a whole — after several refinements, a relaxed
+  (no-exact-match) result can rank against a large pile of requested
+  facets where the top result only satisfies one or two of them. The
+  assistant's wording distinguishes this ("only loosely related to
+  everything you've asked for so far") once three or more facets have
+  accumulated, rather than phrasing it the same as a normal close match.
+- No mid-search session recovery if the popup is closed while a request
+  is in flight (Resham has this via `chrome.storage.session` polling) —
+  a deliberate scope cut; the request still completes server-side, the
+  popup just won't show it if reopened before the response would have
+  arrived.
+- Clicking a product still navigates the real bareeze.com tab and shows
+  an in-popup detail view with a real "Add to Bag" button, instead of
+  Resham's "open in a new tab, add to cart right from the grid" — Resham
+  can do that because its own crawl captures purchasable variant IDs per
+  product; Bareeze's local catalog snapshot doesn't carry that, only the
+  attribute tags used for search, so a live page visit is genuinely
+  necessary to select real options before adding to bag.
+- A per-product "why it matches" line (Resham shows verified facts +
+  match reasoning on every card) was deliberately deferred — it would
+  need per-product match scores plumbed through the response, on top of
+  an already large change; the chips and the assistant's own wording
+  cover the same honesty goal at the whole-result level for now.
+
+All verified live against a running proxy + real bareeze.com tab
+(Playwright driving the actual built extension, not just unit tests):
+store detection/blocking view, an exact-match search, a color-swap
+refinement, a negated-color refinement (chip correctly disappears), a
+"cheaper" refinement with nothing to lower (honest message, not silent),
+and the proxy-unreachable error+retry path.
 
 ### Smart search and the local catalog
 

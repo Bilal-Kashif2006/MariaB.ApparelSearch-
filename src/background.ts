@@ -140,6 +140,12 @@ chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendRespon
       sendResponse(await navigateActiveTab(message.path));
     } else if (message.type === 'ADD_TO_BAG') {
       sendResponse(await addToBag(message.slug));
+    } else if (message.type === 'CHECK_STORE') {
+      // Cheaper than SCRAPE_ACTIVE_TAB for a plain support check: no content
+      // script injection, just "does a bareeze.com tab exist" (same lookup
+      // scrapeActiveTab itself relies on).
+      const tab = await activeBareezeTab();
+      sendResponse(tab ? { type: 'STORE_OK' } : { type: 'NOT_A_BAREEZE_PAGE' });
     }
   })();
   return true; // keep the message channel open for the async response above

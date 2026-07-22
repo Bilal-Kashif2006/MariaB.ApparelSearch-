@@ -45,11 +45,47 @@ export const CATEGORY_PATHS: Record<string, string> = {
 export type PopupRequest =
   | { type: 'SCRAPE_ACTIVE_TAB' }
   | { type: 'OPEN_CATEGORY'; path: string }
-  | { type: 'ADD_TO_BAG'; slug: string };
+  | { type: 'ADD_TO_BAG'; slug: string }
+  | { type: 'CHECK_STORE' };
 
 export type PopupResponse =
   | { type: 'LISTING_RESULT'; cards: ListingCard[]; pageUrl: string }
   | { type: 'PRODUCT_RESULT'; product: ProductDetail; pageUrl: string }
   | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string }
   | { type: 'NOT_A_BAREEZE_PAGE' }
+  | { type: 'STORE_OK' }
   | { type: 'ERROR'; error: string };
+
+// --- Chat-based search state -------------------------------------------
+// Mirrors CatalogIntent in server/src/catalog.ts — the shopper's last
+// resolved, canonical request, echoed back to the server on the next
+// message so a follow-up like "cheaper" or "green instead" merges against
+// it instead of being treated as an unrelated fresh search (see
+// mergeCatalogIntent server-side).
+export interface CanonicalIntent {
+  collection: string | null;
+  fabric: string | null;
+  color: string | null;
+  type: string | null;
+  pieceCount: string | null;
+  occasion: string | null;
+  priceMax: number | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+// Persisted to chrome.storage.local so the conversation survives the
+// popup closing — Chrome can destroy popup.html's whole document the
+// instant it loses focus, unlike a normal tab.
+export interface ConversationState {
+  messages: ChatMessage[];
+  currentIntent: CanonicalIntent | null;
+  currentProducts: ListingCard[] | null;
+  currentRelaxed: boolean;
+  lastQuery: string;
+  updatedAt: number;
+}

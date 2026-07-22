@@ -1,12 +1,139 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bareeze Shopping Assistant</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div id="app"></div>
+    <div class="app-shell">
+      <header class="header">
+        <div class="brand-lockup">
+          <div class="logo" aria-label="Bareeze">Bareeze</div>
+          <div class="store-context" id="store-context" aria-live="polite">
+            <span class="store-dot" aria-hidden="true"></span>
+            <span id="store-name">Checking store…</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="new-search" class="header-button" type="button">New search</button>
+          <button id="layout-toggle" class="square-button" type="button" aria-label="Use compact width" aria-pressed="true" title="Toggle extension width">
+            <svg class="expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M3 3l6 6M16 21h5v-5M21 21l-6-6"/></svg>
+            <svg class="collapse-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M9 9 3 3M15 20v-5h5M15 15l6 6"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="main">
+        <section id="blocking-view" class="blocking-view" hidden role="alert" aria-labelledby="blocking-title">
+          <div class="state-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>
+          </div>
+          <p class="eyebrow">Store unavailable</p>
+          <h1 id="blocking-title" tabindex="-1">Open bareeze.com</h1>
+          <p id="blocking-message" class="support-copy">Open bareeze.com in the active tab, then reopen this extension.</p>
+          <button id="check-store" class="primary-action" type="button">Check current tab</button>
+        </section>
+
+        <section id="workspace-view" class="workspace" aria-label="Bareeze shopping workspace">
+          <section id="products-pane" class="products-pane" aria-labelledby="products-title">
+            <div class="products-toolbar">
+              <div>
+                <p class="eyebrow">Live catalog matches</p>
+                <h1 id="products-title" tabindex="-1">Products</h1>
+              </div>
+              <p id="result-summary" class="result-summary" aria-live="polite">Start with a request in the chat.</p>
+            </div>
+
+            <div id="intent-chips" class="chips" aria-label="Current search filters"></div>
+            <div id="notice" class="notice" hidden></div>
+
+            <div id="products-empty" class="products-empty">
+              <div class="empty-thread" aria-hidden="true"><span></span><span></span><span></span></div>
+              <h2>Dig into the catalog</h2>
+              <p>Describe what you want, then keep refining—try "cheaper," "green instead," or "something more festive."</p>
+            </div>
+
+            <div id="products-loading" class="products-loading" hidden role="status" aria-live="polite">
+              <div class="loading-line"><span></span></div>
+              <div class="product-skeletons" aria-hidden="true">
+                <div class="product-skeleton"></div><div class="product-skeleton"></div>
+                <div class="product-skeleton"></div><div class="product-skeleton"></div>
+              </div>
+            </div>
+
+            <div id="product-list" class="product-list" aria-live="polite" aria-busy="false"></div>
+            <div id="product-feed-controls" class="product-feed-controls" hidden>
+              <button id="load-more-products" class="load-more-products" type="button">
+                <span class="load-more-spinner" aria-hidden="true"></span>
+                <span id="load-more-label">Load more products</span>
+              </button>
+              <p id="product-feed-status" class="product-feed-status" role="status" aria-live="polite"></p>
+            </div>
+            <div id="product-scroll-sentinel" class="product-scroll-sentinel" aria-hidden="true"></div>
+            <div id="no-matches" class="no-matches" hidden>
+              <h2>No close matches yet</h2>
+              <p>Keep the conversation going—change a color, fabric, occasion, or budget.</p>
+            </div>
+
+            <section id="product-detail-view" class="product-detail-view" hidden aria-labelledby="product-detail-title">
+              <button id="back-to-results" class="header-button" type="button">← Back to results</button>
+              <div id="product-detail-body"></div>
+            </section>
+          </section>
+
+          <aside class="chat-pane" aria-labelledby="chat-title">
+            <div class="chat-heading">
+              <div>
+                <p class="eyebrow">Persistent refinement</p>
+                <h2 id="chat-title">Conversation</h2>
+              </div>
+              <span class="online-badge"><span aria-hidden="true"></span>Ready</span>
+            </div>
+
+            <div id="chat-thread" class="chat-thread" role="log" aria-live="polite" aria-relevant="additions"></div>
+
+            <div id="inline-error" class="inline-error" hidden role="alert">
+              <div>
+                <strong id="inline-error-title">Search interrupted</strong>
+                <p id="inline-error-message"></p>
+              </div>
+              <button id="retry-button" type="button">Retry</button>
+            </div>
+
+            <div id="recording-strip" class="recording-strip" hidden>
+              <span class="recording-dot" aria-hidden="true"></span>
+              <div><strong>Listening</strong><span id="recording-time">0:00</span></div>
+              <button id="cancel-recording" type="button">Cancel</button>
+              <button id="stop-recording" type="button">Use voice</button>
+            </div>
+
+            <div id="searching-strip" class="searching-strip" hidden role="status">
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="searching-label">Understanding your request…</span>
+              <button id="cancel-search" type="button">Cancel</button>
+            </div>
+
+            <form id="chat-form" class="chat-composer" novalidate>
+              <label class="sr-only" for="chat-input">Message the Bareeze assistant</label>
+              <textarea id="chat-input" name="query" rows="2" maxlength="500" placeholder="Describe what you want…" required></textarea>
+              <p id="input-error" class="field-error" role="alert" hidden></p>
+              <div class="composer-actions">
+                <button id="mic-button" class="composer-icon-button" type="button" aria-label="Start voice request" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg>
+                </button>
+                <button id="send-button" class="send-button" type="submit">
+                  <span>Send</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
+                </button>
+              </div>
+            </form>
+            <p class="privacy-note">Voice is transcribed via a local proxy and not stored.</p>
+          </aside>
+        </section>
+      </main>
+    </div>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

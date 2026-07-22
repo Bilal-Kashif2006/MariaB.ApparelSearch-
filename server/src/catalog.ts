@@ -83,23 +83,50 @@ export function canonicalizeForCatalog(raw: RawIntent): CatalogIntent {
 const NEGATION_PATTERN = /\b(not|no|don'?t|doesn'?t|isn'?t|without|except)\b/;
 const NEGATABLE_FIELDS = ['collection', 'fabric', 'color', 'type', 'pieceCount', 'occasion'] as const;
 
-export function dropNegatedFields(raw: RawIntent, utterance: string): RawIntent {
+export type NegatableField = (typeof NEGATABLE_FIELDS)[number];
+
+export interface NegationGuardResult {
+  raw: RawIntent;
+  // Fields the shopper explicitly ruled out this turn, not just fields the
+  // fresh turn happened not to mention — mergeCatalogIntent needs this
+  // distinction: nulling the raw value here isn't enough on its own (see
+  // that function's comment for why).
+  negatedFields: Set<NegatableField>;
+}
+
+export function dropNegatedFields(raw: RawIntent, utterance: string): NegationGuardResult {
   // Negation only counts within the same clause — without this split, "not
   // blue, 3 piece is fine" wrongly vetoed pieceCount too, because "not"
   // fell inside a fixed-width lookback window that crossed the comma into
   // an unrelated clause.
   const clauses = utterance.toLowerCase().split(/[,.;!?]+|\band\b|\bbut\b/);
   const result = { ...raw };
+  const negatedFields = new Set<NegatableField>();
   for (const field of NEGATABLE_FIELDS) {
     const value = result[field];
     if (typeof value !== 'string' || !value) continue;
     const valueLower = value.toLowerCase();
+
+    // The LLM sometimes folds the negation word straight into the value
+    // itself (observed live: color: "not blue" for the utterance "not
+    // blue, something else") rather than negating around a clean value —
+    // there's no "before" text to examine in that case, so the value's own
+    // text is checked first.
+    if (NEGATION_PATTERN.test(valueLower)) {
+      result[field] = null;
+      negatedFields.add(field);
+      continue;
+    }
+
     const clause = clauses.find((c) => c.includes(valueLower));
     if (!clause) continue;
     const before = clause.slice(0, clause.indexOf(valueLower));
-    if (NEGATION_PATTERN.test(before)) result[field] = null;
+    if (NEGATION_PATTERN.test(before)) {
+      result[field] = null;
+      negatedFields.add(field);
+    }
   }
-  return result;
+  return { raw: result, negatedFields };
 }
 
 // Words a shopper uses to ask for a lower price without naming a number —
@@ -127,23 +154,40 @@ export interface MergeResult {
 // value instead of being dropped; a facet it DID recognize replaces the old
 // one. That single rule is what makes "green instead" work (color
 // overwrites, everything else survives) with no special handling for the
-// word "instead" at all — and it's also this function's real limit: there's
-// no way to REMOVE a previously-set facet short of overwriting it with a
-// different value or starting a new search (see popup.ts's "New search").
-export function mergeCatalogIntent(previous: CatalogIntent | null, fresh: CatalogIntent, utterance: string): MergeResult {
+// word "instead" at all.
+//
+// negatedFields is what makes "not blue" actually clear a previously-set
+// facet rather than silently keeping it: dropNegatedFields nulls the raw
+// value, but null-inherits-previous would otherwise just fall right back to
+// the old one — indistinguishable from the fresh turn simply not mentioning
+// color at all. Without this, dropNegatedFields protected nothing on an
+// actual refinement turn (the only place it matters), because the merge
+// step erased the distinction it was built to preserve. There's still no
+// way to remove a facet with nothing to replace it beyond this explicit
+// negation, or to combine "remove" with silence about what to use instead
+// — that still requires overwriting with a new value or "New search".
+export function mergeCatalogIntent(
+  previous: CatalogIntent | null,
+  fresh: CatalogIntent,
+  utterance: string,
+  negatedFields: ReadonlySet<NegatableField> = new Set(),
+): MergeResult {
   const priceRelaxRequested = requestsLowerPrice(utterance) && fresh.priceMax == null;
 
   if (!previous) {
     return { intent: fresh, priceRelaxRequested, priceRelaxApplied: false };
   }
 
+  const inherit = (field: NegatableField, freshValue: string | null): string | null =>
+    negatedFields.has(field) ? null : (freshValue ?? previous[field]);
+
   const merged: CatalogIntent = {
-    collection: fresh.collection ?? previous.collection,
-    fabric: fresh.fabric ?? previous.fabric,
-    color: fresh.color ?? previous.color,
-    type: fresh.type ?? previous.type,
-    pieceCount: fresh.pieceCount ?? previous.pieceCount,
-    occasion: fresh.occasion ?? previous.occasion,
+    collection: inherit('collection', fresh.collection),
+    fabric: inherit('fabric', fresh.fabric),
+    color: inherit('color', fresh.color),
+    type: inherit('type', fresh.type),
+    pieceCount: inherit('pieceCount', fresh.pieceCount),
+    occasion: inherit('occasion', fresh.occasion),
     priceMax: fresh.priceMax ?? previous.priceMax,
   };
 

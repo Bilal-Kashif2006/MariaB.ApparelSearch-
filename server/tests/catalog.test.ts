@@ -314,28 +314,48 @@ describe('dropNegatedFields', () => {
   // out, not asking for it.
   it('drops a field whose own value is negated shortly before it in the utterance', () => {
     const intent = rawIntent({ color: 'blue' });
-    expect(dropNegatedFields(intent, 'not blue please').color).toBeNull();
-    expect(dropNegatedFields(intent, 'no blue this time').color).toBeNull();
-    expect(dropNegatedFields(intent, "don't want blue").color).toBeNull();
+    expect(dropNegatedFields(intent, 'not blue please').raw.color).toBeNull();
+    expect(dropNegatedFields(intent, 'no blue this time').raw.color).toBeNull();
+    expect(dropNegatedFields(intent, "don't want blue").raw.color).toBeNull();
+  });
+
+  it('reports the negated field, not just nulling its value', () => {
+    const intent = rawIntent({ color: 'blue' });
+    const result = dropNegatedFields(intent, 'not blue please');
+    expect(result.negatedFields.has('color')).toBe(true);
+  });
+
+  // Regression: found live — the real Groq model returned color: "not blue"
+  // for the utterance "not blue, something else", folding the negation word
+  // straight into the extracted value. There's no "before the value" text
+  // to check in that case at all, so the value's own text has to be
+  // checked directly, not just what precedes it.
+  it('catches a negation word folded directly into the extracted value', () => {
+    const intent = rawIntent({ color: 'not blue' });
+    const result = dropNegatedFields(intent, 'not blue, something else');
+    expect(result.raw.color).toBeNull();
+    expect(result.negatedFields.has('color')).toBe(true);
   });
 
   it('keeps a field whose value is not negated', () => {
     const intent = rawIntent({ color: 'blue', occasion: 'eid' });
     const result = dropNegatedFields(intent, 'blue for eid please');
-    expect(result.color).toBe('blue');
-    expect(result.occasion).toBe('eid');
+    expect(result.raw.color).toBe('blue');
+    expect(result.raw.occasion).toBe('eid');
+    expect(result.negatedFields.size).toBe(0);
   });
 
   it('only drops the specific field that was actually negated', () => {
     const intent = rawIntent({ color: 'blue', pieceCount: '3' });
     const result = dropNegatedFields(intent, 'not blue, 3 piece is fine');
-    expect(result.color).toBeNull();
-    expect(result.pieceCount).toBe('3');
+    expect(result.raw.color).toBeNull();
+    expect(result.raw.pieceCount).toBe('3');
+    expect(result.negatedFields.has('pieceCount')).toBe(false);
   });
 
   it('leaves priceMax untouched (not a negatable string field)', () => {
     const intent = rawIntent({ priceMax: 5000 });
-    expect(dropNegatedFields(intent, 'not 5000').priceMax).toBe(5000);
+    expect(dropNegatedFields(intent, 'not 5000').raw.priceMax).toBe(5000);
   });
 });
 
@@ -393,5 +413,37 @@ describe('mergeCatalogIntent', () => {
     const result = mergeCatalogIntent(previous, fresh, 'something cheaper, under 4000');
     expect(result.priceRelaxRequested).toBe(false);
     expect(result.intent.priceMax).toBe(4000);
+  });
+
+  describe('negatedFields', () => {
+    // Regression: found live end-to-end — "not blue" after a previous
+    // color:"BLUE" search left the color chip showing "Blue" completely
+    // unchanged. dropNegatedFields correctly nulled the fresh value, but
+    // null-inherits-previous (the rule "green instead" relies on) then just
+    // fell back to the OLD blue anyway — indistinguishable from the fresh
+    // turn simply not mentioning color. negatedFields is what breaks that
+    // false equivalence.
+    it('clears a negated facet instead of inheriting the previous value for it', () => {
+      const previous = { ...EMPTY_INTENT, color: 'BLUE', fabric: 'lawn', priceMax: 8000 };
+      const result = mergeCatalogIntent(previous, EMPTY_INTENT, 'not blue, something else', new Set(['color']));
+      expect(result.intent.color).toBeNull();
+      // Everything else not negated still inherits normally.
+      expect(result.intent.fabric).toBe('lawn');
+      expect(result.intent.priceMax).toBe(8000);
+    });
+
+    it('lets an explicit new value in the same turn win over a negation of a different field', () => {
+      const previous = { ...EMPTY_INTENT, color: 'BLUE', occasion: 'festive-eid' };
+      const fresh = { ...EMPTY_INTENT, occasion: 'party-evening' };
+      const result = mergeCatalogIntent(previous, fresh, 'not blue, something for a party instead', new Set(['color']));
+      expect(result.intent.color).toBeNull();
+      expect(result.intent.occasion).toBe('party-evening');
+    });
+
+    it('has no effect when nothing was negated (default empty set)', () => {
+      const previous = { ...EMPTY_INTENT, color: 'BLUE' };
+      const result = mergeCatalogIntent(previous, EMPTY_INTENT, 'hmm');
+      expect(result.intent.color).toBe('BLUE');
+    });
   });
 });

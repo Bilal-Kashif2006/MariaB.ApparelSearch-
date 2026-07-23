@@ -17,6 +17,10 @@
           </div>
         </div>
         <div class="header-actions">
+          <button id="cart-toggle" class="square-button cart-toggle" type="button" aria-label="Open cart" aria-pressed="false" title="Open cart">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2l2.1 9.2a1 1 0 0 0 1 .8H18a1 1 0 0 0 1-.8L21 7H7.4"/></svg>
+            <span id="cart-count" class="cart-count" hidden>0</span>
+          </button>
           <button id="new-search" class="header-button" type="button">New search</button>
           <button id="layout-toggle" class="square-button" type="button" aria-label="Use compact width" aria-pressed="true" title="Toggle extension width">
             <svg class="expand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M3 3l6 6M16 21h5v-5M21 21l-6-6"/></svg>
@@ -80,6 +84,25 @@
             <section id="product-detail-view" class="product-detail-view" hidden aria-labelledby="product-detail-title">
               <button id="back-to-results" class="header-button" type="button">← Back to results</button>
               <div id="product-detail-body"></div>
+            </section>
+
+            <section id="cart-view" class="cart-view" hidden aria-labelledby="cart-title">
+              <div class="cart-view-header">
+                <div>
+                  <p class="eyebrow">Saved from top picks</p>
+                  <h2 id="cart-title">Cart</h2>
+                </div>
+                <button id="cart-close" class="header-button" type="button">Close</button>
+              </div>
+              <div id="cart-empty" class="products-empty" hidden>
+                <h2>Your cart is empty</h2>
+                <p>Add an item from a product detail card and it will appear here.</p>
+              </div>
+              <div id="cart-items" class="cart-items"></div>
+              <div id="cart-footer" class="cart-footer" hidden>
+                <button id="cart-view-site" class="header-button" type="button">View Cart</button>
+                <button id="cart-checkout" class="primary-action" type="button">Checkout</button>
+              </div>
             </section>
           </section>
 

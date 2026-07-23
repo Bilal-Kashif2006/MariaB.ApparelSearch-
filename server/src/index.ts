@@ -6,13 +6,16 @@ import express from 'express';
 import Groq from 'groq-sdk';
 import type { ListingCard } from '../../src/shared/contracts';
 import {
+  applyInterpretationToIntent,
   canonicalizeForCatalog,
   dropNegatedFields,
   invalidateCatalogCache,
+  interpretCatalogIntent,
   isEmptyCatalogIntent,
   mergeCatalogIntent,
   searchCatalog,
   type CatalogIntent,
+  type DeterministicCatalogInterpretation,
 } from './catalog.js';
 import { describeSearchFailure, planShoppingTurn } from './intent.js';
 import { CatalogIntentSchema, type RawIntent } from './schema.js';
@@ -156,6 +159,35 @@ function parsePreviousIntent(raw: unknown): CatalogIntent | null {
   return parsed.success ? parsed.data : null;
 }
 
+function buildRewritePrompt(interpretation: DeterministicCatalogInterpretation): string | null {
+  if (interpretation.suggestedRewrites.length === 0) return null;
+  return `Try ${interpretation.suggestedRewrites.join(', ')}.`;
+}
+
+function shouldClarifyBeforeSearch(interpretation: DeterministicCatalogInterpretation): boolean {
+  return interpretation.ambiguousTerms.length > 0 || interpretation.confidence.mode === 'clarify-first';
+}
+
+function shouldClarifyRelaxedResult(
+  interpretation: DeterministicCatalogInterpretation,
+  relaxed: boolean,
+): boolean {
+  if (!relaxed) return false;
+  if (interpretation.ambiguousTerms.length > 0) return true;
+  if (interpretation.unmatchedTerms.length > 0) return true;
+  return interpretation.confidence.onlyWeakFacets;
+}
+
+function buildClarificationReply(interpretation: DeterministicCatalogInterpretation): string {
+  const directQuestion = interpretation.ambiguousTerms.find((term) => term.question)?.question;
+  if (directQuestion) return directQuestion;
+
+  const rewritePrompt = buildRewritePrompt(interpretation);
+  if (rewritePrompt) return `${interpretation.clarificationReason || 'I need one clearer detail before I search.'} ${rewritePrompt}`.trim();
+
+  return interpretation.clarificationReason || 'What detail matters most here: piece count, collection, fabric, or style?';
+}
+
 // The catalog matches on every recognized facet at once, not just occasion
 // — searchCatalog runs whenever the shopper's intent has anything for it to
 // filter on. null products means "fall back to a broad live collection path
@@ -187,11 +219,13 @@ async function resolveIntentAndProducts(
   priceRelaxApplied: boolean;
   conversationAction: 'search' | 'clarify' | 'unsupported';
   assistantReply: string | null;
+  deterministicInterpretation: DeterministicCatalogInterpretation;
 }> {
   const plan = await planShoppingTurn(transcriptOrText, history);
   const rawIntent = plan.intent;
   const { raw: guardedIntent, negatedFields } = dropNegatedFields(rawIntent, transcriptOrText);
-  const freshCatalogIntent = canonicalizeForCatalog(guardedIntent);
+  const freshInterpretation = interpretCatalogIntent(guardedIntent);
+  const freshCatalogIntent = canonicalizeForCatalog(freshInterpretation.normalizedRawIntent);
   const mergeBaseIntent =
     plan.action === 'search' && plan.searchScope === 'refine'
       ? previousIntent
@@ -202,6 +236,7 @@ async function resolveIntentAndProducts(
     transcriptOrText,
     negatedFields,
   );
+  const deterministicInterpretation = applyInterpretationToIntent(freshInterpretation, canonicalIntent);
 
   // A model may occasionally choose "search" while extracting no usable
   // catalog facet. Fail safely into a helpful question instead of treating
@@ -213,7 +248,7 @@ async function resolveIntentAndProducts(
   if (plan.action === 'unsupported' || isEmptyCatalogIntent(canonicalIntent)) {
     const isUnsupported = plan.action === 'unsupported';
     return {
-      intent: guardedIntent,
+      intent: deterministicInterpretation.normalizedRawIntent,
       canonicalIntent,
       products: null,
       relaxed: false,
@@ -223,17 +258,51 @@ async function resolveIntentAndProducts(
       assistantReply: plan.question || (isUnsupported
         ? `I can't verify a suitable ${STORE_CONFIG.brandName} category for that request. Tell me what type of item or occasion you have in mind.`
         : 'What is the occasion or style you are shopping for?'),
+      deterministicInterpretation,
+    };
+  }
+
+  if (shouldClarifyBeforeSearch(deterministicInterpretation)) {
+    return {
+      intent: deterministicInterpretation.normalizedRawIntent,
+      canonicalIntent,
+      products: null,
+      relaxed: false,
+      priceRelaxRequested,
+      priceRelaxApplied,
+      conversationAction: 'clarify',
+      assistantReply: buildClarificationReply(deterministicInterpretation),
+      deterministicInterpretation,
     };
   }
 
   try {
     const result = searchCatalog(canonicalIntent);
+    if (shouldClarifyRelaxedResult(deterministicInterpretation, result.relaxed)) {
+      return {
+        intent: deterministicInterpretation.normalizedRawIntent,
+        canonicalIntent,
+        products: null,
+        relaxed: false,
+        priceRelaxRequested,
+        priceRelaxApplied,
+        conversationAction: 'clarify',
+        assistantReply: buildClarificationReply({
+          ...deterministicInterpretation,
+          confidence: {
+            ...deterministicInterpretation.confidence,
+            mode: deterministicInterpretation.unmatchedTerms.length > 0 ? 'guided-rewrite' : 'clarify-first',
+          },
+        }),
+        deterministicInterpretation,
+      };
+    }
     // The extension is a concise recommendation layer, not a duplicate
     // storefront. Keep the ranked response to five real catalog products;
     // the shopper explicitly opens the live page for final confirmation.
     const products = result.products.slice(0, 5);
     return {
-      intent: guardedIntent,
+      intent: deterministicInterpretation.normalizedRawIntent,
       canonicalIntent,
       products,
       relaxed: result.relaxed,
@@ -241,10 +310,21 @@ async function resolveIntentAndProducts(
       priceRelaxApplied,
       conversationAction: 'search',
       assistantReply: null,
+      deterministicInterpretation,
     };
   } catch (error) {
     console.error(`Local catalog search failed (is ${STORE_CONFIG.server.catalogDbRelativePath} available?):`, error);
-    return { intent: guardedIntent, canonicalIntent, products: [], relaxed: false, priceRelaxRequested, priceRelaxApplied, conversationAction: 'search', assistantReply: null };
+    return {
+      intent: deterministicInterpretation.normalizedRawIntent,
+      canonicalIntent,
+      products: [],
+      relaxed: false,
+      priceRelaxRequested,
+      priceRelaxApplied,
+      conversationAction: 'search',
+      assistantReply: null,
+      deterministicInterpretation,
+    };
   }
 }
 
@@ -282,9 +362,9 @@ app.post(
         res.status(422).json({ error: 'Could not make out anything in that recording. Try again.' });
         return;
       }
-      const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply } =
+      const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply, deterministicInterpretation } =
         await resolveIntentAndProducts(transcript, previousIntent);
-      res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
+      res.json({ transcript, intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply, deterministicInterpretation });
     } catch (error) {
       console.error('voice-intent request failed:', error);
       res.status(502).json({
@@ -308,9 +388,9 @@ app.post('/text-intent', async (req, res) => {
   const history = typeof body?.history === 'string' ? body.history.slice(-4_000) : '';
 
   try {
-    const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply } =
+    const { intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply, deterministicInterpretation } =
       await resolveIntentAndProducts(text, previousIntent, history);
-    res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply });
+    res.json({ intent, canonicalIntent, products, relaxed, priceRelaxRequested, priceRelaxApplied, conversationAction, assistantReply, deterministicInterpretation });
   } catch (error) {
     console.error('text-intent request failed:', error);
     // Keep provider errors, model output, and stack traces out of the client

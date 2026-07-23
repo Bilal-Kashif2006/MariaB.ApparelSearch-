@@ -69,9 +69,17 @@ const RELATIVE_PRICE_DOWN_PHRASES = ['cheaper', 'less expensive', 'more affordab
 const NEGATION_PATTERN = /\b(not|no|don'?t|doesn'?t|isn'?t|without|except)\b/;
 const NEGATABLE_FIELDS = ['collection', 'fabric', 'color', 'type', 'pieceCount', 'occasion'] as const;
 const SOFT_FACET_FIELDS = ['collection', 'fabric', 'color', 'type', 'occasion', 'pieceCount'] as const;
+const VALUE_FIELDS = ['collection', 'fabric', 'color', 'type', 'pieceCount', 'occasion'] as const;
+const SHALWAR_KAMEEZ_PATTERN = /\b(s|sh)alwar\s+kameez\b|\b(s|sh)alwar\s+suit\b/;
+const STITCHED_PATTERN = /\bstitched\b/;
+const UNSTITCHED_PATTERN = /\bunstitched\b/;
+const PRET_PATTERN = /\bpret\b/;
+const WHITE_FAMILY_PATTERN = /\b(?:plain|basic|solid)\s+white\b|\bwhite\s+(?:plain|basic|solid)\b/;
 
 type NegatableField = (typeof NEGATABLE_FIELDS)[number];
 type SoftFacetField = (typeof SOFT_FACET_FIELDS)[number];
+type ValueField = (typeof VALUE_FIELDS)[number];
+type QueryConfidenceMode = 'exact-search' | 'relaxed-search' | 'clarify-first' | 'guided-rewrite';
 
 export interface CatalogIntent {
   collection: string | null;
@@ -112,6 +120,31 @@ export interface CatalogSearchResult {
   relaxed: boolean;
 }
 
+export interface DeterministicCatalogTerm {
+  term: string;
+  reason: string;
+  question?: string;
+}
+
+export interface QueryConfidence {
+  matchedFacetCount: number;
+  ambiguousFacetCount: number;
+  unmatchedConceptCount: number;
+  onlyWeakFacets: boolean;
+  mode: QueryConfidenceMode;
+}
+
+export interface DeterministicCatalogInterpretation {
+  normalizedRawIntent: RawIntent;
+  canonicalIntent: CatalogIntent;
+  appliedFacets: CatalogIntent;
+  ambiguousTerms: DeterministicCatalogTerm[];
+  unmatchedTerms: string[];
+  suggestedRewrites: string[];
+  clarificationReason: string | null;
+  confidence: QueryConfidence;
+}
+
 let cachedCatalog: CatalogProduct[] | null = null;
 
 export function invalidateCatalogCache(): void {
@@ -137,16 +170,176 @@ export function canonicalizeOccasion(raw: string | null | undefined): string | n
   return null;
 }
 
-export function canonicalizeForCatalog(raw: RawIntent): CatalogIntent {
+function cloneRawIntent(raw: RawIntent): RawIntent {
   return {
-    collection: canonicalizeCollection(raw.collection),
-    fabric: canonicalizeFabric(raw.fabric),
-    color: canonicalizeColor(raw.color),
-    type: canonicalizeType(raw.type),
-    pieceCount: canonicalizePieceCount(raw.pieceCount),
-    occasion: canonicalizeOccasion(raw.occasion),
-    priceMax: typeof raw.priceMax === 'number' && Number.isFinite(raw.priceMax) && raw.priceMax > 0 ? raw.priceMax : null,
+    collection: raw.collection ?? null,
+    fabric: raw.fabric ?? null,
+    color: raw.color ?? null,
+    type: raw.type ?? null,
+    pieceCount: raw.pieceCount ?? null,
+    occasion: raw.occasion ?? null,
+    priceMax: raw.priceMax ?? null,
   };
+}
+
+function rawIntentTexts(raw: RawIntent): string[] {
+  return VALUE_FIELDS
+    .map((field) => raw[field])
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim().toLowerCase());
+}
+
+function buildShalwarKameezQuestion(intent: CatalogIntent): string {
+  const colorPart = intent.color ? `${intent.color.toLowerCase()} ` : '';
+  return `Do you want ${colorPart}2 piece or ${colorPart}3 piece?`;
+}
+
+function formatSuggestionValue(value: string | null): string | null {
+  return value ? value.toLowerCase() : null;
+}
+
+function buildRewriteSuggestions(intent: CatalogIntent, unmatchedTerms: string[]): string[] {
+  const suggestions = new Set<string>();
+  const color = formatSuggestionValue(intent.color);
+  const pieceCount = formatSuggestionValue(intent.pieceCount);
+  const type = formatSuggestionValue(intent.type);
+
+  if (unmatchedTerms.includes('stitched')) {
+    suggestions.add([color, 'luxury pret'].filter(Boolean).join(' '));
+    suggestions.add([color, pieceCount || '3 piece'].filter(Boolean).join(' '));
+    suggestions.add([color, type || 'embroidered', 'suit'].filter(Boolean).join(' '));
+  }
+
+  return [...suggestions].filter(Boolean);
+}
+
+function computeQueryConfidence(intent: CatalogIntent, ambiguousTerms: DeterministicCatalogTerm[], unmatchedTerms: string[]): QueryConfidence {
+  const matchedFacetCount = countSoftFacets(intent) + (intent.priceMax != null ? 1 : 0);
+  const onlyWeakFacets =
+    matchedFacetCount <= 1 &&
+    intent.color != null &&
+    !intent.collection &&
+    !intent.fabric &&
+    !intent.type &&
+    !intent.pieceCount &&
+    !intent.occasion &&
+    intent.priceMax == null;
+
+  let mode: QueryConfidenceMode = 'exact-search';
+  if (ambiguousTerms.length > 0 || (unmatchedTerms.length > 0 && (matchedFacetCount <= 1 || onlyWeakFacets))) {
+    mode = 'clarify-first';
+  } else if (unmatchedTerms.length > 0) {
+    mode = 'guided-rewrite';
+  }
+
+  return {
+    matchedFacetCount,
+    ambiguousFacetCount: ambiguousTerms.length,
+    unmatchedConceptCount: unmatchedTerms.length,
+    onlyWeakFacets,
+    mode,
+  };
+}
+
+export function interpretCatalogIntent(raw: RawIntent): DeterministicCatalogInterpretation {
+  const normalizedRawIntent = cloneRawIntent(raw);
+  const texts = rawIntentTexts(normalizedRawIntent);
+  const unmatchedTerms = new Set<string>();
+  const ambiguousTerms: DeterministicCatalogTerm[] = [];
+
+  if (!normalizedRawIntent.color && texts.some((text) => WHITE_FAMILY_PATTERN.test(text))) {
+    normalizedRawIntent.color = 'white';
+  }
+  if (!normalizedRawIntent.type && texts.some((text) => WHITE_FAMILY_PATTERN.test(text))) {
+    normalizedRawIntent.type = 'plain';
+  }
+
+  if (!normalizedRawIntent.pieceCount) {
+    const pieceSource = texts.find((text) => canonicalizePieceCount(text));
+    if (pieceSource) normalizedRawIntent.pieceCount = pieceSource;
+  }
+
+  const hasPret = texts.some((text) => PRET_PATTERN.test(text));
+  const hasStitched = texts.some((text) => STITCHED_PATTERN.test(text) && !UNSTITCHED_PATTERN.test(text));
+  const shalwarKameezMentioned = texts.some((text) => SHALWAR_KAMEEZ_PATTERN.test(text));
+
+  if (hasPret && (!normalizedRawIntent.collection || STITCHED_PATTERN.test(normalizedRawIntent.collection.toLowerCase()))) {
+    normalizedRawIntent.collection = 'pret';
+  }
+
+  if (normalizedRawIntent.collection && hasStitched && !hasPret && !UNSTITCHED_PATTERN.test(normalizedRawIntent.collection.toLowerCase())) {
+    normalizedRawIntent.collection = null;
+    unmatchedTerms.add('stitched');
+  } else if (!normalizedRawIntent.collection && hasStitched && !hasPret) {
+    unmatchedTerms.add('stitched');
+  }
+
+  const canonicalIntent = {
+    collection: canonicalizeCollection(normalizedRawIntent.collection),
+    fabric: canonicalizeFabric(normalizedRawIntent.fabric),
+    color: canonicalizeColor(normalizedRawIntent.color),
+    type: canonicalizeType(normalizedRawIntent.type),
+    pieceCount: canonicalizePieceCount(normalizedRawIntent.pieceCount),
+    occasion: canonicalizeOccasion(normalizedRawIntent.occasion),
+    priceMax: typeof normalizedRawIntent.priceMax === 'number' && Number.isFinite(normalizedRawIntent.priceMax) && normalizedRawIntent.priceMax > 0
+      ? normalizedRawIntent.priceMax
+      : null,
+  };
+
+  if (shalwarKameezMentioned && !canonicalIntent.pieceCount) {
+    ambiguousTerms.push({
+      term: 'shalwar kameez',
+      reason: 'Piece count materially changes the result set.',
+      question: buildShalwarKameezQuestion(canonicalIntent),
+    });
+  }
+
+  const suggestedRewrites = buildRewriteSuggestions(canonicalIntent, [...unmatchedTerms]);
+  const confidence = computeQueryConfidence(canonicalIntent, ambiguousTerms, [...unmatchedTerms]);
+  const clarificationReason =
+    ambiguousTerms[0]?.reason
+    ?? (confidence.mode === 'clarify-first'
+      ? 'The request is still too broad to search responsibly.'
+      : unmatchedTerms.size > 0
+        ? `I couldn't map ${[...unmatchedTerms].join(', ')} to a verified ${STORE_CONFIG.brandName} catalog facet.`
+        : null);
+
+  return {
+    normalizedRawIntent,
+    canonicalIntent,
+    appliedFacets: canonicalIntent,
+    ambiguousTerms,
+    unmatchedTerms: [...unmatchedTerms],
+    suggestedRewrites,
+    clarificationReason,
+    confidence,
+  };
+}
+
+export function applyInterpretationToIntent(
+  interpretation: DeterministicCatalogInterpretation,
+  intent: CatalogIntent,
+): DeterministicCatalogInterpretation {
+  const suggestedRewrites = buildRewriteSuggestions(intent, interpretation.unmatchedTerms);
+  const confidence = computeQueryConfidence(intent, interpretation.ambiguousTerms, interpretation.unmatchedTerms);
+  return {
+    ...interpretation,
+    canonicalIntent: intent,
+    appliedFacets: intent,
+    suggestedRewrites,
+    clarificationReason:
+      interpretation.ambiguousTerms[0]?.reason
+      ?? (confidence.mode === 'clarify-first'
+        ? 'The request is still too broad to search responsibly.'
+        : interpretation.unmatchedTerms.length > 0
+          ? `I couldn't map ${interpretation.unmatchedTerms.join(', ')} to a verified ${STORE_CONFIG.brandName} catalog facet.`
+          : null),
+    confidence,
+  };
+}
+
+export function canonicalizeForCatalog(raw: RawIntent): CatalogIntent {
+  return interpretCatalogIntent(raw).canonicalIntent;
 }
 
 export function dropNegatedFields(raw: RawIntent, utterance: string): NegationGuardResult {
@@ -425,6 +618,7 @@ function loadCatalog(): CatalogProduct[] {
       const availableVariants = productVariants.filter((variant) => Boolean(variant.available));
       const availableSizes = parseSizeTokens(availableVariants.map((variant) => variant.size || ''));
       const allSizes = parseSizeTokens([...productSizes, ...productVariants.map((variant) => variant.size || '')]);
+      const hasVariantData = productVariants.length > 0;
       const comparePrices = productVariants
         .map((variant) => ({ price: variant.price, compareAt: variant.compare_at_price }))
         .filter((item) => typeof item.price === 'number' && typeof item.compareAt === 'number' && item.compareAt > item.price) as Array<{
@@ -456,7 +650,7 @@ function loadCatalog(): CatalogProduct[] {
         categories,
         attributes,
         occasion: inferOccasion(row.category, [...shopifyTags, ...tags], description, row.product_formality, row.occasion),
-        inStock: availableVariants.length > 0 || Boolean(row.in_stock),
+        inStock: hasVariantData ? availableVariants.length > 0 : Boolean(row.in_stock),
         availableVariantCount: availableVariants.length,
         totalVariantCount: productVariants.length,
         availableSizes,

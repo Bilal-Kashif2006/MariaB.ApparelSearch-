@@ -11,6 +11,7 @@ export const MAX_RECORDING_MS = 15_000;
 export const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
 export const CONVERSATION_KEY = STORE_CONFIG.extension.conversationKey;
 export const LAYOUT_KEY = STORE_CONFIG.extension.layoutKey;
+export const CART_KEY = `${CONVERSATION_KEY}:cart`;
 // Chat history older than this is treated as stale and reset on next open
 // (same threshold Resham uses) rather than resuming a months-old thread.
 export const CONVERSATION_MAX_AGE_MS = 30 * 24 * 60 * 60_000;

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyInterpretationToIntent,
   canonicalizeForCatalog,
   canonicalizeOccasion,
   dropNegatedFields,
+  interpretCatalogIntent,
   isEmptyCatalogIntent,
   matchesIntent,
   mergeCatalogIntent,
@@ -106,6 +108,58 @@ describe('canonicalizeForCatalog', () => {
       occasion: null,
       priceMax: null,
     });
+  });
+
+  it('normalizes white phrase variants into the same color and plain-type concept', () => {
+    expect(canonicalizeForCatalog({ color: 'plain white' })).toEqual({
+      ...EMPTY_INTENT,
+      color: 'White',
+      type: 'Dyed',
+    });
+    expect(canonicalizeForCatalog({ color: 'basic white' }).color).toBe('White');
+    expect(canonicalizeForCatalog({ color: 'solid white' }).color).toBe('White');
+  });
+
+  it('does not silently map generic stitched language to casuals', () => {
+    expect(canonicalizeForCatalog({ collection: 'stitched suit', color: 'white' })).toEqual({
+      ...EMPTY_INTENT,
+      color: 'White',
+    });
+  });
+});
+
+describe('interpretCatalogIntent', () => {
+  it('flags shalwar kameez without a piece count as an ambiguity', () => {
+    const interpretation = interpretCatalogIntent({ collection: 'white shalwar kameez', color: 'white' });
+    expect(interpretation.canonicalIntent.color).toBe('White');
+    expect(interpretation.ambiguousTerms).toHaveLength(1);
+    expect(interpretation.ambiguousTerms[0]?.term).toBe('shalwar kameez');
+    expect(interpretation.ambiguousTerms[0]?.question).toBe('Do you want white 2 piece or white 3 piece?');
+    expect(interpretation.confidence.mode).toBe('clarify-first');
+  });
+
+  it('accepts shalwar kameez once piece count is known', () => {
+    const interpretation = interpretCatalogIntent({ collection: 'white shalwar kameez', color: 'white', pieceCount: '3 piece' });
+    expect(interpretation.canonicalIntent.pieceCount).toBe('3 Piece');
+    expect(interpretation.ambiguousTerms).toEqual([]);
+  });
+
+  it('maps pret but leaves generic stitched as a rewrite problem', () => {
+    const pret = interpretCatalogIntent({ collection: 'pret suit', color: 'white' });
+    expect(pret.canonicalIntent.collection).toBe('luxury pret');
+
+    const stitched = interpretCatalogIntent({ collection: 'stitched suit', color: 'white' });
+    expect(stitched.canonicalIntent.collection).toBeNull();
+    expect(stitched.unmatchedTerms).toEqual(['stitched']);
+    expect(stitched.suggestedRewrites).toContain('white luxury pret');
+    expect(stitched.confidence.mode).toBe('clarify-first');
+  });
+
+  it('reassesses confidence after merging a previous intent', () => {
+    const fresh = interpretCatalogIntent({ pieceCount: '3 piece' });
+    const merged = applyInterpretationToIntent(fresh, { ...EMPTY_INTENT, color: 'White', pieceCount: '3 Piece' });
+    expect(merged.appliedFacets.color).toBe('White');
+    expect(merged.confidence.matchedFacetCount).toBe(2);
   });
 });
 

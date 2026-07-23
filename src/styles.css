@@ -91,7 +91,25 @@ textarea:focus-visible,
 .header-button { min-height: 34px; padding: 0 12px; border-radius: 999px; }
 .square-button { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; }
 .header-button:hover, .square-button:hover { border-color: var(--emerald); background: var(--emerald-soft); }
+.square-button[aria-pressed="true"] { border-color: var(--emerald); background: var(--emerald-soft); }
 .square-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.cart-toggle { position: relative; }
+.cart-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--emerald);
+  color: #fff;
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+}
 .collapse-icon { display: none; }
 body.is-expanded .expand-icon { display: none; }
 body.is-expanded .collapse-icon { display: block; }
@@ -216,11 +234,98 @@ h2 { margin-bottom: 7px; font-size: 17px; line-height: 1.15; }
 .product-detail-view .detail-image { width: 100%; max-height: 320px; object-fit: cover; border-radius: 9px; margin-bottom: 12px; border: 1px solid var(--line); box-shadow: 0 2px 7px rgba(42, 35, 31, .05); }
 .product-detail-view h2 { font-size: 18px; margin-bottom: 4px; }
 .product-detail-view .sku { color: var(--muted); font-size: 9.5px; margin-bottom: 4px; }
-.product-detail-view .price { color: var(--emerald); font-size: 15px; font-weight: 800; margin-bottom: 14px; }
+.product-detail-view .price { color: var(--emerald); font-size: 15px; font-weight: 800; margin-bottom: 4px; }
+.product-detail-view .detail-compare-price { color: #8b8179; font-size: 10px; font-weight: 700; text-decoration: line-through; margin-bottom: 10px; }
+.product-detail-view .detail-stock { margin: 0 0 8px; font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.product-detail-view .detail-stock.is-in { color: var(--emerald); }
+.product-detail-view .detail-stock.is-out { color: #7f2c25; }
+.product-detail-view .detail-meta { margin: 0 0 14px; color: var(--muted); font-size: 9.5px; line-height: 1.45; }
 .product-detail-view .primary-action { width: 100%; }
 .product-detail-view .add-status { margin-top: 8px; color: var(--emerald-hover); font-size: 9.5px; font-weight: 700; }
 .cart-actions { display: flex; gap: 8px; margin-top: 10px; }
 .cart-actions .header-button, .cart-actions .primary-action { flex: 1; width: auto; margin: 0; }
+
+.cart-view { padding-top: 4px; }
+.cart-view-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.cart-view-header h2 { margin-bottom: 0; }
+.cart-items { display: flex; flex-direction: column; gap: 10px; }
+.cart-item {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid #dcd5d0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .34);
+  box-shadow: 0 2px 7px rgba(42, 35, 31, .05);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.cart-item-image {
+  width: 76px;
+  height: 94px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid #e3dcd7;
+  background: #ece7e3;
+}
+.cart-item-fallback {
+  width: 76px;
+  height: 94px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border: 1px solid #e3dcd7;
+  border-radius: 7px;
+  background: #ece7e3;
+  color: #66625e;
+  font-size: 8.5px;
+  text-align: center;
+}
+.cart-item-body { min-width: 0; display: flex; flex-direction: column; }
+.cart-item-title {
+  color: #222b27;
+  font-family: Georgia, serif;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.cart-item-price {
+  margin-top: 4px;
+  color: var(--emerald);
+  font-size: 10px;
+  font-weight: 850;
+}
+.cart-item-meta {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 700;
+}
+.cart-item-link {
+  margin-top: auto;
+  align-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--emerald);
+  font-size: 8.5px;
+  font-weight: 850;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.cart-footer {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.cart-footer .header-button, .cart-footer .primary-action { flex: 1; }
 
 .chat-pane {
   min-width: 0;

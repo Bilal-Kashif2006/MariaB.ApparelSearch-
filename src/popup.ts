@@ -1,7 +1,10 @@
 import type {
+  CartItem,
+  CartState,
   CanonicalIntent,
   ChatMessage,
   ConversationState,
+  DeterministicInterpretation,
   ListingCard,
   PopupRequest,
   PopupResponse,
@@ -13,6 +16,7 @@ import { summarizeIntentMatch } from './shared/summarize-intent-match';
 import { renderListingCard } from './ui/product-card';
 import { VoiceRecorder } from './voice/voice-recorder';
 import {
+  CART_KEY,
   CONVERSATION_KEY,
   CONVERSATION_MAX_AGE_MS,
   INTENT_REQUEST_TIMEOUT_MS,
@@ -35,6 +39,7 @@ interface ServerIntentResult {
   priceRelaxApplied: boolean;
   conversationAction: 'search' | 'clarify' | 'unsupported';
   assistantReply: string | null;
+  deterministicInterpretation?: DeterministicInterpretation;
 }
 
 function mustElement<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -51,6 +56,8 @@ const storeName = mustElement('store-name');
 const productsToolbar = document.querySelector('.products-toolbar') as HTMLElement;
 const productList = mustElement('product-list');
 const productsPane = mustElement('products-pane');
+const cartToggle = mustElement<HTMLButtonElement>('cart-toggle');
+const cartCount = mustElement('cart-count');
 const productFeedControls = mustElement('product-feed-controls');
 const productFeedStatus = mustElement('product-feed-status');
 const loadMoreButton = mustElement<HTMLButtonElement>('load-more-products');
@@ -64,6 +71,12 @@ const resultSummary = mustElement('result-summary');
 const notice = mustElement('notice');
 const productDetailView = mustElement('product-detail-view');
 const productDetailBody = mustElement('product-detail-body');
+const cartView = mustElement('cart-view');
+const cartItems = mustElement('cart-items');
+const cartEmpty = mustElement('cart-empty');
+const cartFooter = mustElement('cart-footer');
+const cartViewSiteButton = mustElement<HTMLButtonElement>('cart-view-site');
+const cartCheckoutButton = mustElement<HTMLButtonElement>('cart-checkout');
 const chatThread = mustElement('chat-thread');
 const chatForm = mustElement<HTMLFormElement>('chat-form');
 const chatInput = mustElement<HTMLTextAreaElement>('chat-input');
@@ -101,6 +114,13 @@ let recordingTimer: number | null = null;
 let visibleProductCount = 0;
 let loadingMoreProducts = false;
 let productPaneHasScrolled = false;
+let currentCart: CartState = {
+  items: [],
+  viewCartUrl: '/cart',
+  checkoutUrl: null,
+  updatedAt: 0,
+};
+let activePane: 'results' | 'detail' | 'cart' = 'results';
 
 const PRODUCT_BATCH_SIZE = 5;
 
@@ -112,6 +132,157 @@ function message(role: ChatMessage['role'], text: string): ChatMessage {
   return { id: crypto.randomUUID(), role, text };
 }
 
+function totalCartCount(): number {
+  return currentCart.items.reduce((sum, item) => sum + item.quantity, 0);
+}
+
+function hasAnyIntentFacet(intent: CanonicalIntent | null): boolean {
+  return Boolean(
+    intent &&
+    (
+      intent.collection ||
+      intent.fabric ||
+      intent.color ||
+      intent.type ||
+      intent.pieceCount ||
+      intent.occasion ||
+      intent.priceMax != null
+    )
+  );
+}
+
+function persistCart(): void {
+  currentCart.updatedAt = Date.now();
+  void chrome.storage.local.set({ [CART_KEY]: currentCart });
+}
+
+function updateCartBadge(): void {
+  const count = totalCartCount();
+  cartCount.hidden = count === 0;
+  cartCount.textContent = String(count);
+  cartToggle.setAttribute('aria-label', count > 0 ? `Open cart, ${count} item${count === 1 ? '' : 's'}` : 'Open cart');
+  cartToggle.title = count > 0 ? `Open cart (${count})` : 'Open cart';
+}
+
+function setPane(nextPane: 'results' | 'detail' | 'cart'): void {
+  activePane = nextPane;
+  const showingResults = nextPane === 'results';
+  const showingDetail = nextPane === 'detail';
+  const showingCart = nextPane === 'cart';
+  productsToolbar.hidden = !showingResults;
+  intentChips.hidden = !showingResults;
+  notice.hidden = !showingResults || (!currentRelaxed && !notice.textContent);
+  productsEmpty.hidden = !showingResults || currentProducts !== null;
+  productList.hidden = !showingResults || !currentProducts || currentProducts.length === 0;
+  productFeedControls.hidden = true;
+  noMatches.hidden = !showingResults || !currentProducts || currentProducts.length > 0;
+  productDetailView.hidden = !showingDetail;
+  cartView.hidden = !showingCart;
+  cartToggle.setAttribute('aria-pressed', String(showingCart));
+}
+
+function renderCart(): void {
+  cartItems.replaceChildren();
+  const items = [...currentCart.items].sort((a, b) => b.addedAt - a.addedAt);
+  cartEmpty.hidden = items.length > 0;
+  cartItems.hidden = items.length === 0;
+  cartFooter.hidden = items.length === 0;
+  cartViewSiteButton.disabled = items.length === 0;
+  cartCheckoutButton.disabled = items.length === 0;
+
+  for (const item of items) {
+    const card = document.createElement('article');
+    card.className = 'cart-item';
+
+    if (item.imageUrl) {
+      const image = document.createElement('img');
+      image.className = 'cart-item-image';
+      image.src = item.imageUrl;
+      image.alt = '';
+      card.append(image);
+    } else {
+      const fallback = document.createElement('div');
+      fallback.className = 'cart-item-fallback';
+      fallback.textContent = 'Image unavailable';
+      card.append(fallback);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'cart-item-body';
+    const title = document.createElement('strong');
+    title.className = 'cart-item-title';
+    title.textContent = item.title;
+    const price = document.createElement('p');
+    price.className = 'cart-item-price';
+    price.textContent = item.price;
+    const meta = document.createElement('p');
+    meta.className = 'cart-item-meta';
+    meta.textContent = `Quantity: ${item.quantity}`;
+    const reopen = document.createElement('button');
+    reopen.type = 'button';
+    reopen.className = 'cart-item-link';
+    reopen.textContent = 'Open product';
+    reopen.addEventListener('click', () => void openProduct(item.slug));
+    body.append(title, price, meta, reopen);
+    card.append(body);
+    cartItems.append(card);
+  }
+
+  updateCartBadge();
+}
+
+async function refreshCartFromSite(fallback?: Partial<CartState>): Promise<boolean> {
+  const response = await sendMessage({ type: 'SYNC_CART' });
+  if (response.type !== 'CART_SYNC_RESULT' || !response.synced) {
+    if (fallback) {
+      currentCart = {
+        items: fallback.items ?? currentCart.items,
+        viewCartUrl: fallback.viewCartUrl ?? currentCart.viewCartUrl,
+        checkoutUrl: fallback.checkoutUrl ?? currentCart.checkoutUrl,
+        updatedAt: Date.now(),
+      };
+      persistCart();
+      renderCart();
+    }
+    return false;
+  }
+
+  currentCart = response.cart;
+  persistCart();
+  renderCart();
+  return true;
+}
+
+async function showCartView(): Promise<void> {
+  renderCart();
+  setPane('cart');
+  await refreshCartFromSite();
+  mustElement('cart-title').focus();
+}
+
+function upsertCartItem(product: ProductDetail, viewCartUrl: string, checkoutUrl: string | null): void {
+  const existing = currentCart.items.find((item) => item.slug === product.slug);
+  if (existing) {
+    existing.quantity += 1;
+    existing.addedAt = Date.now();
+    existing.price = product.price;
+    existing.imageUrl = product.images[0] || existing.imageUrl;
+    existing.title = product.title;
+  } else {
+    currentCart.items.push({
+      slug: product.slug,
+      title: product.title,
+      price: product.price,
+      imageUrl: product.images[0] || null,
+      quantity: 1,
+      addedAt: Date.now(),
+    });
+  }
+  currentCart.viewCartUrl = viewCartUrl;
+  currentCart.checkoutUrl = checkoutUrl;
+  persistCart();
+  renderCart();
+}
 
 function setInputError(text: string | null): void {
   inputError.hidden = !text;
@@ -222,6 +393,7 @@ function appendNextProductBatch(immediate = false): void {
 function renderResults(products: ListingCard[] | null, relaxed: boolean): void {
   currentProducts = products;
   currentRelaxed = relaxed;
+  activePane = 'results';
   visibleProductCount = 0;
   loadingMoreProducts = false;
   productPaneHasScrolled = false;
@@ -229,7 +401,7 @@ function renderResults(products: ListingCard[] | null, relaxed: boolean): void {
   productList.replaceChildren();
   intentChips.replaceChildren();
   productsLoading.hidden = true;
-  hideProductDetail();
+  setPane('results');
 
   if (!products) {
     productList.hidden = true;
@@ -350,6 +522,9 @@ async function fetchLiveNewIn(): Promise<ListingCard[]> {
 
 async function applyServerResult(result: ServerIntentResult): Promise<void> {
   if (result.conversationAction !== 'search') {
+    if (result.conversationAction === 'clarify' && hasAnyIntentFacet(result.canonicalIntent)) {
+      currentIntent = result.canonicalIntent;
+    }
     messages.push(message('assistant', result.assistantReply || 'What would you like help finding?'));
     renderChat();
     persistConversation();
@@ -366,7 +541,10 @@ async function applyServerResult(result: ServerIntentResult): Promise<void> {
   }
 
   const shoppingIntent = canonicalizeIntent(result.intent);
-  const { unmatched } = summarizeIntentMatch(result.intent, shoppingIntent);
+  const { unmatched: summarizedUnmatched } = summarizeIntentMatch(result.intent, shoppingIntent);
+  const unmatched = result.deterministicInterpretation?.unmatchedTerms.length
+    ? result.deterministicInterpretation.unmatchedTerms
+    : summarizedUnmatched;
 
   renderResults(products, relaxed);
   messages.push(message('assistant', buildAssistantReply({ ...result, products }, unmatched)));
@@ -471,6 +649,8 @@ function resetConversation(): void {
   hideInlineError();
   messages = [welcomeMessage];
   currentIntent = null;
+  currentProducts = null;
+  currentRelaxed = false;
   lastQuery = '';
   lastRetriableQuery = null;
   renderResults(null, false);
@@ -484,31 +664,22 @@ function resetConversation(): void {
 // alone can't safely offer — see README for why this differs from a
 // straight visual port) --------------------------------------------------
 function hideProductDetail(): void {
-  productDetailView.hidden = true;
-  productsToolbar.hidden = false;
-  intentChips.hidden = false;
-  notice.hidden = !currentRelaxed;
-  productsEmpty.hidden = currentProducts !== null;
-  productList.hidden = !currentProducts || currentProducts.length === 0;
-  productFeedControls.hidden = true;
-  noMatches.hidden = !currentProducts || currentProducts.length > 0;
+  setPane('results');
 }
 
-function showProductDetail(product: ProductDetail): void {
-  productsToolbar.hidden = true;
-  intentChips.hidden = true;
-  notice.hidden = true;
-  productsEmpty.hidden = true;
-  productList.hidden = true;
-  productFeedControls.hidden = true;
-  noMatches.hidden = true;
-  productDetailView.hidden = false;
+function findListingCard(slug: string): ListingCard | null {
+  return currentProducts?.find((item) => item.slug === slug) ?? null;
+}
+
+function showProductDetail(product: ProductDetail, fallbackCard: ListingCard | null = null): void {
+  setPane('detail');
 
   productDetailBody.replaceChildren();
-  if (product.images[0]) {
+  const primaryImage = product.images[0] || fallbackCard?.imageUrl || null;
+  if (primaryImage) {
     const img = document.createElement('img');
     img.className = 'detail-image';
-    img.src = product.images[0];
+    img.src = primaryImage;
     img.alt = '';
     productDetailBody.append(img);
   }
@@ -526,11 +697,32 @@ function showProductDetail(product: ProductDetail): void {
   price.className = 'price';
   price.textContent = product.price;
   productDetailBody.append(price);
+  if (product.compareAtPrice && product.compareAtPrice !== product.price) {
+    const compareAt = document.createElement('p');
+    compareAt.className = 'detail-compare-price';
+    compareAt.textContent = product.compareAtPrice;
+    productDetailBody.append(compareAt);
+  }
+
+  const stock = document.createElement('p');
+  stock.className = `detail-stock ${product.inStock === false ? 'is-out' : 'is-in'}`;
+  stock.textContent = product.inStock === false ? 'Out of stock' : product.inStock === true ? 'In stock' : 'Check availability on site';
+  productDetailBody.append(stock);
+
+  const sizes = product.availableSizes.length ? product.availableSizes : (fallbackCard?.availableSizes ?? []);
+  if (sizes.length) {
+    const sizeMeta = document.createElement('p');
+    sizeMeta.className = 'detail-meta';
+    sizeMeta.textContent = `Available sizes: ${sizes.join(', ')}`;
+    productDetailBody.append(sizeMeta);
+  }
 
   const addButton = document.createElement('button');
   addButton.type = 'button';
   addButton.className = 'primary-action';
   addButton.textContent = 'Add to Bag';
+  addButton.disabled = product.inStock === false;
+  if (product.inStock === false) addButton.textContent = 'Sold out';
   const status = document.createElement('p');
   status.className = 'add-status';
 
@@ -555,7 +747,11 @@ function showProductDetail(product: ProductDetail): void {
   checkoutButton.type = 'button';
   checkoutButton.className = 'primary-action';
   checkoutButton.textContent = 'Checkout';
-  checkoutButton.addEventListener('click', () => void sendMessage({ type: 'OPEN_PATH', path: checkoutUrl ?? viewCartUrl }));
+  checkoutButton.addEventListener('click', () => void sendMessage({
+    type: 'OPEN_CHECKOUT',
+    checkoutUrl,
+    viewCartUrl,
+  }));
   cartActions.append(viewCartButton, checkoutButton);
 
   addButton.addEventListener('click', async () => {
@@ -568,11 +764,23 @@ function showProductDetail(product: ProductDetail): void {
       addButton.textContent = 'Added';
       viewCartUrl = response.viewCartUrl || '/cart';
       checkoutUrl = response.checkoutUrl ?? null;
+      upsertCartItem(
+        {
+          ...product,
+          images: primaryImage ? [primaryImage, ...product.images.filter((image) => image !== primaryImage)] : product.images,
+        },
+        viewCartUrl,
+        checkoutUrl,
+      );
+      await refreshCartFromSite({
+        viewCartUrl,
+        checkoutUrl,
+      });
       cartActions.hidden = false;
     } else {
       status.textContent = response.type === 'ADD_TO_BAG_RESULT' ? response.error || 'Could not add to bag.' : 'Could not add to bag.';
       addButton.disabled = false;
-      addButton.textContent = 'Add to Bag';
+      addButton.textContent = product.inStock === false ? 'Sold out' : 'Add to Bag';
     }
   });
   productDetailBody.append(addButton, status, cartActions);
@@ -582,7 +790,7 @@ function showProductDetail(product: ProductDetail): void {
 async function openProduct(slug: string): Promise<void> {
   const response = await sendMessage({ type: 'OPEN_PRODUCT', slug });
   if (response.type === 'PRODUCT_RESULT') {
-    showProductDetail(response.product);
+    showProductDetail(response.product, findListingCard(slug));
   } else {
     messages.push(message('assistant', 'Could not open that product — try again.'));
     renderChat();
@@ -718,7 +926,7 @@ function setExpanded(expanded: boolean): void {
 }
 
 async function restoreState(): Promise<void> {
-  const durable = await chrome.storage.local.get([CONVERSATION_KEY, LAYOUT_KEY]);
+  const durable = await chrome.storage.local.get([CONVERSATION_KEY, LAYOUT_KEY, CART_KEY]);
   setExpanded(durable[LAYOUT_KEY] !== false);
 
   const conversation = durable[CONVERSATION_KEY] as ConversationState | undefined;
@@ -730,6 +938,17 @@ async function restoreState(): Promise<void> {
   } else {
     renderResults(null, false);
   }
+  const cart = durable[CART_KEY] as CartState | undefined;
+  if (cart?.items) {
+    currentCart = {
+      items: cart.items,
+      viewCartUrl: cart.viewCartUrl || '/cart',
+      checkoutUrl: cart.checkoutUrl ?? null,
+      updatedAt: cart.updatedAt || 0,
+    };
+  }
+  renderCart();
+  await refreshCartFromSite();
   renderChat();
 }
 
@@ -784,6 +1003,20 @@ mustElement('cancel-recording').addEventListener('click', cancelRecording);
 mustElement('cancel-search').addEventListener('click', () => void cancelSearch());
 mustElement('new-search').addEventListener('click', resetConversation);
 mustElement('back-to-results').addEventListener('click', hideProductDetail);
+mustElement('cart-close').addEventListener('click', hideProductDetail);
+cartToggle.addEventListener('click', () => {
+  if (activePane === 'cart') hideProductDetail();
+  else void showCartView();
+});
+cartViewSiteButton.addEventListener('click', () => void sendMessage({ type: 'OPEN_PATH', path: currentCart.viewCartUrl || '/cart' }));
+cartCheckoutButton.addEventListener('click', () => void sendMessage({
+  type: 'OPEN_CHECKOUT',
+  checkoutUrl: currentCart.checkoutUrl,
+  viewCartUrl: currentCart.viewCartUrl || '/cart',
+}));
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) void refreshCartFromSite();
+});
 retryButton.addEventListener('click', () => {
   if (lastRetriableQuery) void beginSearch(lastRetriableQuery, false);
 });

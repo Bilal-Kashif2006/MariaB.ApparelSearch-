@@ -20,8 +20,11 @@ export interface ProductDetail {
   title: string;
   sku: string | null;
   price: string;
+  compareAtPrice?: string | null;
   images: string[];
   options: string[]; // whatever the live product page exposes, if any
+  availableSizes: string[];
+  inStock: boolean | null;
 }
 
 // Maria B collection landing pages. The extension's primary search path is
@@ -50,6 +53,8 @@ export type PopupRequest =
   | { type: 'OPEN_PRODUCT'; slug: string }
   | { type: 'ADD_TO_BAG'; slug: string }
   | { type: 'OPEN_PATH'; path: string }
+  | { type: 'OPEN_CHECKOUT'; checkoutUrl?: string | null; viewCartUrl?: string | null }
+  | { type: 'SYNC_CART' }
   | { type: 'CHECK_STORE' };
 
 export type PopupResponse =
@@ -60,6 +65,7 @@ export type PopupResponse =
   // per-session path (a UUID Bareeze mints for that cart), never a fixed
   // route, so it can only be read off the page, not constructed here.
   | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }
+  | { type: 'CART_SYNC_RESULT'; cart: CartState; synced: boolean; error?: string }
   | { type: 'PATH_OPENED' }
   | { type: 'NOT_A_STORE_PAGE' }
   | { type: 'STORE_OK' }
@@ -81,6 +87,39 @@ export interface CanonicalIntent {
   priceMax: number | null;
 }
 
+export interface DeterministicCatalogTerm {
+  term: string;
+  reason: string;
+  question?: string;
+}
+
+export interface QueryConfidence {
+  matchedFacetCount: number;
+  ambiguousFacetCount: number;
+  unmatchedConceptCount: number;
+  onlyWeakFacets: boolean;
+  mode: 'exact-search' | 'relaxed-search' | 'clarify-first' | 'guided-rewrite';
+}
+
+export interface DeterministicInterpretation {
+  normalizedRawIntent: {
+    collection?: string | null;
+    fabric?: string | null;
+    color?: string | null;
+    type?: string | null;
+    pieceCount?: string | null;
+    occasion?: string | null;
+    priceMax?: number | null;
+  };
+  canonicalIntent: CanonicalIntent;
+  appliedFacets: CanonicalIntent;
+  ambiguousTerms: DeterministicCatalogTerm[];
+  unmatchedTerms: string[];
+  suggestedRewrites: string[];
+  clarificationReason: string | null;
+  confidence: QueryConfidence;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -96,5 +135,21 @@ export interface ConversationState {
   currentProducts: ListingCard[] | null;
   currentRelaxed: boolean;
   lastQuery: string;
+  updatedAt: number;
+}
+
+export interface CartItem {
+  slug: string;
+  title: string;
+  price: string;
+  imageUrl: string | null;
+  quantity: number;
+  addedAt: number;
+}
+
+export interface CartState {
+  items: CartItem[];
+  viewCartUrl: string;
+  checkoutUrl: string | null;
   updatedAt: number;
 }

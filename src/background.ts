@@ -197,7 +197,7 @@ async function openCheckout(checkoutUrl?: string | null, viewCartUrl = '/cart'):
     : { type: 'ERROR', error: 'Checkout did not open from the cart page.' };
 }
 
-async function addToBag(slug: string): Promise<PopupResponse> {
+async function addToBag(slug: string, size?: string | null): Promise<PopupResponse> {
   const targetUrl = `${STORE_ORIGIN}${STORE_CONFIG.site.productPathPrefix}${encodeURIComponent(slug)}`;
   const existing = await activeStoreTab();
   let tabId = existing?.id;
@@ -214,7 +214,7 @@ async function addToBag(slug: string): Promise<PopupResponse> {
   const result = await injectAndMessage<{ ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }>(
     tabId!,
     'addToBag.js',
-    { type: 'CLICK_ADD_TO_BAG' },
+    { type: 'CLICK_ADD_TO_BAG', size },
   );
   return {
     type: 'ADD_TO_BAG_RESULT',
@@ -223,6 +223,38 @@ async function addToBag(slug: string): Promise<PopupResponse> {
     viewCartUrl: result?.viewCartUrl,
     checkoutUrl: result?.checkoutUrl,
   };
+}
+
+async function removeFromCart(
+  slug: string,
+  size?: string | null,
+  key?: string | null,
+  id?: number | string | null,
+): Promise<PopupResponse> {
+  const tab = await activeStoreTab();
+  if (!tab?.id) {
+    return {
+      type: 'REMOVE_FROM_CART_RESULT',
+      ok: true,
+      error: 'Item removed locally. Open store tab to sync.',
+    };
+  }
+
+  const result = await injectAndMessage<{ ok: boolean; cart?: CartState; error?: string }>(
+    tab.id,
+    'siteCart.js',
+    { type: 'REMOVE_FROM_CART', slug, size, key, id },
+  );
+
+  if (!result?.ok || !result.cart) {
+    return {
+      type: 'REMOVE_FROM_CART_RESULT',
+      ok: false,
+      error: result?.error || 'Could not remove item from site cart.',
+    };
+  }
+
+  return { type: 'REMOVE_FROM_CART_RESULT', ok: true, cart: result.cart };
 }
 
 chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendResponse) => {
@@ -234,7 +266,9 @@ chrome.runtime.onMessage.addListener((message: PopupRequest, _sender, sendRespon
     } else if (message.type === 'OPEN_PRODUCT') {
       sendResponse(await openProduct(message.slug));
     } else if (message.type === 'ADD_TO_BAG') {
-      sendResponse(await addToBag(message.slug));
+      sendResponse(await addToBag(message.slug, message.size));
+    } else if (message.type === 'REMOVE_FROM_CART') {
+      sendResponse(await removeFromCart(message.slug, message.size, message.key, message.id));
     } else if (message.type === 'OPEN_PATH') {
       sendResponse(await openPath(message.path));
     } else if (message.type === 'OPEN_CHECKOUT') {

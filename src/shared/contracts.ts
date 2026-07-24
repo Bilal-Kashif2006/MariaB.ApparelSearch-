@@ -51,7 +51,8 @@ export type PopupRequest =
   | { type: 'SCRAPE_ACTIVE_TAB' }
   | { type: 'OPEN_CATEGORY'; path: string }
   | { type: 'OPEN_PRODUCT'; slug: string }
-  | { type: 'ADD_TO_BAG'; slug: string }
+  | { type: 'ADD_TO_BAG'; slug: string; size?: string | null }
+  | { type: 'REMOVE_FROM_CART'; slug: string; size?: string | null; key?: string | null; id?: number | string | null }
   | { type: 'OPEN_PATH'; path: string }
   | { type: 'OPEN_CHECKOUT'; checkoutUrl?: string | null; viewCartUrl?: string | null }
   | { type: 'SYNC_CART' }
@@ -65,6 +66,7 @@ export type PopupResponse =
   // per-session path (a UUID Bareeze mints for that cart), never a fixed
   // route, so it can only be read off the page, not constructed here.
   | { type: 'ADD_TO_BAG_RESULT'; ok: boolean; error?: string; viewCartUrl?: string | null; checkoutUrl?: string | null }
+  | { type: 'REMOVE_FROM_CART_RESULT'; ok: boolean; cart?: CartState; error?: string }
   | { type: 'CART_SYNC_RESULT'; cart: CartState; synced: boolean; error?: string }
   | { type: 'PATH_OPENED' }
   | { type: 'NOT_A_STORE_PAGE' }
@@ -139,12 +141,15 @@ export interface ConversationState {
 }
 
 export interface CartItem {
+  id?: number | string | null;
+  key?: string | null;
   slug: string;
   title: string;
   price: string;
   imageUrl: string | null;
   quantity: number;
   addedAt: number;
+  size?: string | null;
 }
 
 export interface CartState {

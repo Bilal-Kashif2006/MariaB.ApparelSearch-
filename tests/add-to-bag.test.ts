@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clickAddToBag } from '../src/content/add-to-bag';
+import { clickAddToBag, selectSizeOnPage } from '../src/content/add-to-bag';
 
 describe('clickAddToBag', () => {
   it('clicks the real Add To Bag button when present and enabled', async () => {
@@ -174,5 +174,39 @@ describe('clickAddToBag', () => {
     const result = await clickAddToBag(50);
 
     expect(result).toEqual({ ok: true, viewCartUrl: '/cart', checkoutUrl: null });
+  });
+
+  it('selects size on page via button chip', () => {
+    document.body.innerHTML = `
+      <main>
+        <button type="button" class="size-btn">Small</button>
+        <button type="button" class="size-btn">Medium</button>
+        <button type="button" class="size-btn">Large</button>
+      </main>`;
+    let clickedText = '';
+    document.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => { clickedText = b.textContent || ''; });
+    });
+
+    const ok = selectSizeOnPage('Medium');
+    expect(ok).toBe(true);
+    expect(clickedText).toBe('Medium');
+  });
+
+  it('selects size on page via select dropdown', () => {
+    document.body.innerHTML = `
+      <main>
+        <select name="options[Size]">
+          <option value="S">Small</option>
+          <option value="M">Medium</option>
+          <option value="L">Large</option>
+        </select>
+      </main>`;
+
+    const select = document.querySelector('select') as HTMLSelectElement;
+    const ok = selectSizeOnPage('Large');
+
+    expect(ok).toBe(true);
+    expect(select.value).toBe('L');
   });
 });

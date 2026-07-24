@@ -11,6 +11,7 @@ import type {
   ProductDetail,
 } from './shared/contracts';
 import { canonicalizeIntent, type RawIntentFields } from './shared/canonicalize';
+import { calculateSubtotal } from './shared/cart-utils';
 import { STORE_ASSISTANT_LABEL, STORE_BLOCKING_COPY, STORE_CONFIG, STORE_OPEN_PROMPT, STORE_STATUS_LABEL } from './shared/store';
 import { summarizeIntentMatch } from './shared/summarize-intent-match';
 import { renderListingCard } from './ui/product-card';
@@ -181,6 +182,28 @@ function setPane(nextPane: 'results' | 'detail' | 'cart'): void {
   cartToggle.setAttribute('aria-pressed', String(showingCart));
 }
 
+async function handleRemoveCartItem(targetItem: CartItem): Promise<void> {
+  currentCart.items = currentCart.items.filter(
+    (i) => !(i === targetItem || (i.slug === targetItem.slug && (i.size || null) === (targetItem.size || null) && i.key === targetItem.key)),
+  );
+  persistCart();
+  renderCart();
+
+  const response = await sendMessage({
+    type: 'REMOVE_FROM_CART',
+    slug: targetItem.slug,
+    size: targetItem.size,
+    key: targetItem.key,
+    id: targetItem.id,
+  });
+
+  if (response.type === 'REMOVE_FROM_CART_RESULT' && response.ok && response.cart) {
+    currentCart = response.cart;
+    persistCart();
+    renderCart();
+  }
+}
+
 function renderCart(): void {
   cartItems.replaceChildren();
   const items = [...currentCart.items].sort((a, b) => b.addedAt - a.addedAt);
@@ -189,6 +212,11 @@ function renderCart(): void {
   cartFooter.hidden = items.length === 0;
   cartViewSiteButton.disabled = items.length === 0;
   cartCheckoutButton.disabled = items.length === 0;
+
+  const subtotalEl = document.getElementById('cart-subtotal-amount');
+  if (subtotalEl) {
+    subtotalEl.textContent = calculateSubtotal(items);
+  }
 
   for (const item of items) {
     const card = document.createElement('article');
@@ -217,13 +245,26 @@ function renderCart(): void {
     price.textContent = item.price;
     const meta = document.createElement('p');
     meta.className = 'cart-item-meta';
-    meta.textContent = `Quantity: ${item.quantity}`;
+    meta.textContent = `Quantity: ${item.quantity}${item.size ? ` • Size: ${item.size}` : ''}`;
+
+    const itemActions = document.createElement('div');
+    itemActions.className = 'cart-item-actions';
+
     const reopen = document.createElement('button');
     reopen.type = 'button';
     reopen.className = 'cart-item-link';
     reopen.textContent = 'Open product';
     reopen.addEventListener('click', () => void openProduct(item.slug));
-    body.append(title, price, meta, reopen);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'cart-item-remove';
+    removeBtn.textContent = 'Remove';
+    removeBtn.setAttribute('aria-label', `Remove ${item.title} from cart`);
+    removeBtn.addEventListener('click', () => void handleRemoveCartItem(item));
+
+    itemActions.append(reopen, removeBtn);
+    body.append(title, price, meta, itemActions);
     card.append(body);
     cartItems.append(card);
   }
@@ -260,8 +301,15 @@ async function showCartView(): Promise<void> {
   mustElement('cart-title').focus();
 }
 
-function upsertCartItem(product: ProductDetail, viewCartUrl: string, checkoutUrl: string | null): void {
-  const existing = currentCart.items.find((item) => item.slug === product.slug);
+function upsertCartItem(
+  product: ProductDetail,
+  viewCartUrl: string,
+  checkoutUrl: string | null,
+  size?: string | null,
+): void {
+  const existing = currentCart.items.find(
+    (item) => item.slug === product.slug && (item.size || null) === (size || null),
+  );
   if (existing) {
     existing.quantity += 1;
     existing.addedAt = Date.now();
@@ -276,6 +324,7 @@ function upsertCartItem(product: ProductDetail, viewCartUrl: string, checkoutUrl
       imageUrl: product.images[0] || null,
       quantity: 1,
       addedAt: Date.now(),
+      size: size || null,
     });
   }
   currentCart.viewCartUrl = viewCartUrl;
@@ -710,11 +759,45 @@ function showProductDetail(product: ProductDetail, fallbackCard: ListingCard | n
   productDetailBody.append(stock);
 
   const sizes = product.availableSizes.length ? product.availableSizes : (fallbackCard?.availableSizes ?? []);
+  let selectedSize: string | null = sizes.length > 0 ? sizes[0] : null;
+
   if (sizes.length) {
-    const sizeMeta = document.createElement('p');
-    sizeMeta.className = 'detail-meta';
-    sizeMeta.textContent = `Available sizes: ${sizes.join(', ')}`;
-    productDetailBody.append(sizeMeta);
+    const sizeContainer = document.createElement('div');
+    sizeContainer.className = 'detail-size-container';
+
+    const sizeHeading = document.createElement('p');
+    sizeHeading.className = 'detail-size-heading';
+    sizeHeading.textContent = 'Select Size:';
+    sizeContainer.append(sizeHeading);
+
+    const sizeGroup = document.createElement('div');
+    sizeGroup.className = 'detail-size-group';
+    sizeGroup.setAttribute('role', 'radiogroup');
+    sizeGroup.setAttribute('aria-label', 'Select size');
+
+    sizes.forEach((sz) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `size-chip ${sz === selectedSize ? 'is-selected' : ''}`;
+      chip.textContent = sz;
+      chip.setAttribute('role', 'radio');
+      chip.setAttribute('aria-checked', String(sz === selectedSize));
+
+      chip.addEventListener('click', () => {
+        selectedSize = sz;
+        sizeGroup.querySelectorAll('.size-chip').forEach((c) => {
+          c.classList.remove('is-selected');
+          c.setAttribute('aria-checked', 'false');
+        });
+        chip.classList.add('is-selected');
+        chip.setAttribute('aria-checked', 'true');
+      });
+
+      sizeGroup.append(chip);
+    });
+
+    sizeContainer.append(sizeGroup);
+    productDetailBody.append(sizeContainer);
   }
 
   const addButton = document.createElement('button');
@@ -758,7 +841,7 @@ function showProductDetail(product: ProductDetail, fallbackCard: ListingCard | n
     addButton.disabled = true;
     addButton.textContent = 'Adding…';
     cartActions.hidden = true;
-    const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug });
+    const response = await sendMessage({ type: 'ADD_TO_BAG', slug: product.slug, size: selectedSize });
     if (response.type === 'ADD_TO_BAG_RESULT' && response.ok) {
       status.textContent = `Added to your ${STORE_ASSISTANT_LABEL} cart.`;
       addButton.textContent = 'Added';
@@ -771,6 +854,7 @@ function showProductDetail(product: ProductDetail, fallbackCard: ListingCard | n
         },
         viewCartUrl,
         checkoutUrl,
+        selectedSize,
       );
       await refreshCartFromSite({
         viewCartUrl,

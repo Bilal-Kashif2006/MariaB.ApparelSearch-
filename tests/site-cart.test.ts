@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readSiteCart, startCheckout } from '../src/content/site-cart';
+import { readSiteCart, removeSiteCartItem, startCheckout } from '../src/content/site-cart';
 
 describe('readSiteCart', () => {
   beforeEach(() => {
@@ -65,6 +65,48 @@ describe('readSiteCart', () => {
 
     const cart = await readSiteCart();
     expect(cart.checkoutUrl).toBe('/cart');
+  });
+});
+
+describe('removeSiteCartItem', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('posts to /cart/change.js with quantity 0 for matching item key', async () => {
+    const postCalls: Array<{ url: string; body: unknown }> = [];
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === '/cart.js') {
+        return new Response(JSON.stringify({
+          items: [
+            {
+              key: 'key123',
+              title: 'Lawn Suit',
+              quantity: 1,
+              final_price: 1000000,
+              url: '/products/lawn-suit',
+              variant_title: 'Medium',
+            },
+          ],
+        }), { status: 200 });
+      }
+      if (url === '/cart/change.js') {
+        postCalls.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === '/cart') {
+        return new Response('<html><body></body></html>', { status: 200 });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    await removeSiteCartItem({ slug: 'lawn-suit', size: 'Medium', key: 'key123' });
+
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0]?.body).toEqual({ id: 'key123', line: 1, quantity: 0 });
   });
 });
 
